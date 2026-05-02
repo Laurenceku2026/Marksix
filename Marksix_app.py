@@ -844,9 +844,10 @@ if st.button("🚀 生成智能投注", type="primary"):
             st.caption(f"包含连号/跳号: {'✅ 是' if has_pattern else '❌ 否'}")
             st.divider()
     
-    st.info(f"""
-    📊 **预测信息**
-    - 使用最近 {use_analysis_periods} 期数据进行分析
-    - 当前策略: {strategy}
-    - 共生成 {num_bets} 注推荐号码
-    - 每注均经过热码优先 + 和值约束 + 连号
+    st.info("预测信息: 使用最近 {} 期数据进行分析 | 策略: {} | 共生成 {} 注".format(
+        use_analysis_periods, strategy, num_bets
+    ))
+
+# 页脚
+st.markdown("---")
+st.caption("⚠️ 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
