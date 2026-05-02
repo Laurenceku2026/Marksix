@@ -153,6 +153,11 @@ def get_target_sum_by_numbers_count(num_count):
     # 基于 (1+49)/2 = 25
     return 25 * num_count
 
+def convert_6sum_to_7sum(sum_6):
+    """将6码和值转换为7码和值（按比例）"""
+    # 6码理论均值150，7码理论均值175，比例 = 175/150 = 7/6
+    return int(sum_6 * 7 / 6)
+
 def calculate_scores(draws, window_total=100, window_short=20, window_recent=10):
     """计算每个号码的综合得分"""
     if len(draws) < window_total:
@@ -271,13 +276,14 @@ def generate_combination(scores, num_count, target_sum=None, tolerance=15, requi
     
     return sorted(random.sample(range(1, 50), num_count)), sum(sorted(random.sample(range(1, 50), num_count)))
 
-def predict_trend(draws, window=5):
-    """根据最近window期的和值预测下一期趋势（返回目标方向）"""
+def predict_trend_7code(draws, window=5):
+    """根据最近window期的6码和值预测下一期7码趋势"""
     if len(draws) < window:
         return "中"
     
-    recent_sums = [draw['sum'] for draw in draws[-window:]]
-    avg_sum = np.mean(recent_sums)
+    recent_sums_6 = [draw['sum'] for draw in draws[-window:]]
+    recent_sums_7 = [convert_6sum_to_7sum(s) for s in recent_sums_6]
+    avg_sum = np.mean(recent_sums_7)
     
     if avg_sum > 185:
         return "小"
@@ -296,17 +302,28 @@ def get_trend_target_sum(trend, num_count):
     else:
         return base_sum
 
-def generate_bets_by_strategy(draws, scores, num_bets, strategy, num_count, require_pattern, trend_window, random_seed):
+def set_random_seed(seed_input):
+    """设置随机种子"""
+    if seed_input is not None:
+        try:
+            random.seed(seed_input)
+            np.random.seed(seed_input)
+        except (ValueError, TypeError):
+            random.seed(42)
+            np.random.seed(42)
+    else:
+        # 完全随机
+        random.seed()
+        np.random.seed()
+
+def generate_bets_by_strategy(draws, scores, num_bets, strategy, num_count, require_pattern, trend_window, seed_input):
     """根据策略生成投注"""
-    if random_seed is not None:
-        random.seed(random_seed)
-        np.random.seed(random_seed)
+    set_random_seed(seed_input)
     
     bets = []
     base_target = get_target_sum_by_numbers_count(num_count)
     
     if strategy == "和值大中小":
-        # 大中小各一
         if num_bets >= 1:
             nums, total = generate_combination(scores, num_count, base_target - 15, 15, require_pattern)
             bets.append({'numbers': nums, 'sum': total, 'target': f'小和值({base_target-15})', 'deviation': total - base_target})
@@ -316,16 +333,14 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, num_count, requ
         if num_bets >= 3:
             nums, total = generate_combination(scores, num_count, base_target + 15, 15, require_pattern)
             bets.append({'numbers': nums, 'sum': total, 'target': f'大和值({base_target+15})', 'deviation': total - base_target})
-        # 剩余注数用中和值填充
         for i in range(3, num_bets):
             nums, total = generate_combination(scores, num_count, base_target, 15, require_pattern)
             bets.append({'numbers': nums, 'sum': total, 'target': f'中和值({base_target}) 补充{i-2}', 'deviation': total - base_target})
     
     elif strategy == "和值趋势预测":
-        trend = predict_trend(draws, window=trend_window)
+        trend = predict_trend_7code(draws, window=trend_window)
         trend_target = get_trend_target_sum(trend, num_count)
         for i in range(num_bets):
-            # 添加轻微随机偏移
             offset = random.randint(-5, 5)
             target = trend_target + offset
             target = max(25 * num_count - 30, min(25 * num_count + 30, target))
@@ -334,7 +349,6 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, num_count, requ
     
     else:  # 混合策略
         half = max(1, num_bets // 2)
-        # 大中小部分
         if half >= 1:
             nums, total = generate_combination(scores, num_count, base_target - 15, 15, require_pattern)
             bets.append({'numbers': nums, 'sum': total, 'target': f'小和值({base_target-15})', 'deviation': total - base_target})
@@ -344,8 +358,7 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, num_count, requ
         if half >= 3:
             nums, total = generate_combination(scores, num_count, base_target + 15, 15, require_pattern)
             bets.append({'numbers': nums, 'sum': total, 'target': f'大和值({base_target+15})', 'deviation': total - base_target})
-        # 趋势预测部分
-        trend = predict_trend(draws, window=trend_window)
+        trend = predict_trend_7code(draws, window=trend_window)
         trend_target = get_trend_target_sum(trend, num_count)
         for i in range(num_bets - half):
             offset = random.randint(-5, 5)
@@ -375,11 +388,9 @@ def calculate_prize(match_count, special_match):
     else:
         return "无中奖", 0
 
-def backtest_strategy(draws, num_bets_per_draw, strategy, num_count, require_pattern, trend_window, analysis_periods, test_periods, random_seed):
+def backtest_strategy(draws, num_bets_per_draw, strategy, num_count, require_pattern, trend_window, analysis_periods, test_periods, seed_input):
     """回测策略 - 只测试最后N期"""
-    if random_seed is not None:
-        random.seed(random_seed)
-        np.random.seed(random_seed)
+    set_random_seed(seed_input)
     
     if len(draws) < test_periods + analysis_periods:
         return None, f"数据不足：需要至少 {test_periods + analysis_periods} 期数据"
@@ -837,7 +848,7 @@ with col1:
 with col2:
     st.metric("最新日期", latest_date)
 with col3:
-    st.metric("数据总量", f"{len(draws)} 期 ({draws[0].get('period')} ~ {latest_period})")
+    st.metric("数据总量", f"{len(draws)} 期")
 
 # ==================== 冷热码分析 ====================
 st.subheader("🔥 冷热码分析")
@@ -882,8 +893,8 @@ with col3:
     if len(recent_active) > 15:
         st.write(f"... 共{len(recent_active)}个")
 
-# ==================== 和值趋势分析 ====================
-st.subheader("📈 和值趋势分析")
+# ==================== 和值趋势分析（以7码显示） ====================
+st.subheader("📈 和值趋势分析（7个号码）")
 
 show_periods = st.slider(
     "显示最近期数",
@@ -893,57 +904,49 @@ show_periods = st.slider(
     step=10
 )
 
+# 将6码和值转换为7码和值
+sum_7_values = [convert_6sum_to_7sum(draw['sum']) for draw in draws[-show_periods:]]
+
 sum_df = pd.DataFrame([
-    {'期次': i+1, '和值': draw['sum']}
-    for i, draw in enumerate(draws[-show_periods:])
+    {'期次': i+1, '和值(7码)': val}
+    for i, val in enumerate(sum_7_values)
 ])
 
-fig = px.line(sum_df, x='期次', y='和值', title=f'最近{show_periods}期和值走势 (6个正码)')
-fig.add_hline(y=150, line_dash="dash", line_color="red", annotation_text="理论均值(150)")
-fig.add_hrect(y0=115, y1=185, line_width=0, fillcolor="green", opacity=0.1, annotation_text="约68%区间")
+fig = px.line(sum_df, x='期次', y='和值(7码)', title=f'最近{show_periods}期和值走势 (7个号码 - 按比例转换)')
+fig.add_hline(y=175, line_dash="dash", line_color="red", annotation_text="理论均值(175)")
+fig.add_hrect(y0=140, y1=210, line_width=0, fillcolor="green", opacity=0.1, annotation_text="约68%区间")
 st.plotly_chart(fig, use_container_width=True)
 
-sum_stats = pd.DataFrame([draw['sum'] for draw in draws[-show_periods:]], columns=['和值'])
+sum_stats = pd.DataFrame(sum_7_values, columns=['和值(7码)'])
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("平均和值", f"{sum_stats['和值'].mean():.1f}")
+    st.metric("平均和值", f"{sum_stats['和值(7码)'].mean():.1f}")
 with col2:
-    st.metric("最大和值", f"{sum_stats['和值'].max()}")
+    st.metric("最大和值", f"{sum_stats['和值(7码)'].max()}")
 with col3:
-    st.metric("最小和值", f"{sum_stats['和值'].min()}")
+    st.metric("最小和值", f"{sum_stats['和值(7码)'].min()}")
 with col4:
-    st.metric("标准差", f"{sum_stats['和值'].std():.1f}")
+    st.metric("标准差", f"{sum_stats['和值(7码)'].std():.1f}")
 
-# 当前趋势预测（用于显示）
+# 当前趋势预测（基于7码）
 if len(draws) >= 5:
-    recent_sums = [draw['sum'] for draw in draws[-5:]]
-    avg_sum = np.mean(recent_sums)
+    recent_sums_7 = [convert_6sum_to_7sum(draw['sum']) for draw in draws[-5:]]
+    avg_sum = np.mean(recent_sums_7)
     if avg_sum > 185:
-        trend_desc = "📈 偏大 → 建议关注小和值 (135)"
+        trend_desc = "📈 偏大 → 建议关注小和值 (160)"
     elif avg_sum < 165:
-        trend_desc = "📉 偏小 → 建议关注大和值 (165)"
+        trend_desc = "📉 偏小 → 建议关注大和值 (190)"
     else:
-        trend_desc = "⚖️ 正常 → 建议关注中和值 (150)"
-    st.info(f"**当前和值趋势分析**: 最近5期平均和值 = {avg_sum:.1f} | {trend_desc}")
+        trend_desc = "⚖️ 正常 → 建议关注中和值 (175)"
+    st.info(f"**当前和值趋势分析**: 最近5期平均和值(7码) = {avg_sum:.1f} | {trend_desc}")
 
 # ==================== 智能投注生成 ====================
 st.subheader("🎲 智能投注生成")
 
-# 计算下一期期次和日期
+# 计算下一期期次
 next_period = latest_period + 1 if isinstance(latest_period, int) else "N/A"
-next_date = "待开奖"
-if latest_date:
-    try:
-        if isinstance(latest_date, str):
-            latest_date_obj = datetime.strptime(latest_date, "%Y-%m-%d")
-        else:
-            latest_date_obj = latest_date
-        # 六合彩每周二、四、六开奖
-        next_date = "待定"
-    except:
-        next_date = "待定"
 
-st.info(f"🎯 **预测下一期**: {next_period} | 日期: {next_date}")
+st.info(f"🎯 **预测下一期**: {next_period}")
 
 # 用户输入参数
 col1, col2, col3, col4 = st.columns(4)
@@ -994,9 +997,16 @@ with col1:
     )
 
 with col2:
+    # 开奖日期选择器
+    selected_date = st.date_input(
+        "开奖日期",
+        value=datetime.now(),
+        help="用于生成Random Seed的开奖日期"
+    )
+    
     use_dynamic_seed = st.selectbox(
-        "Random Seed",
-        ["开奖日期+21:30", "固定种子1", "固定种子3", "固定种子5", "固定种子7", "固定种子9", "完全随机"],
+        "Random Seed模式",
+        ["使用选定日期+21:30", "固定种子1", "固定种子3", "固定种子5", "固定种子7", "固定种子9", "完全随机"],
         index=0,
         help="影响随机数生成"
     )
@@ -1013,14 +1023,13 @@ with col3:
     )
 
 # 生成随机种子
-if use_dynamic_seed == "开奖日期+21:30":
-    now = datetime.now()
-    seed_value = int(now.strftime("%Y%m%d%H%M"))
+if use_dynamic_seed == "使用选定日期+21:30":
+    seed_value = int(selected_date.strftime("%Y%m%d") + "2130")
     random_seed = seed_value
-    seed_display = f"{now.strftime('%Y-%m-%d')} 21:30"
+    seed_display = f"{selected_date.strftime('%Y-%m-%d')} 21:30"
 elif use_dynamic_seed == "完全随机":
     random_seed = None
-    seed_display = "随机"
+    seed_display = "完全随机"
 else:
     random_seed = int(use_dynamic_seed.split("种子")[1])
     seed_display = use_dynamic_seed
