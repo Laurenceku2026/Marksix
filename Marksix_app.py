@@ -110,6 +110,39 @@ def parse_pasted_data(text):
     
     return draws
 
+def parse_multi_draws_for_checking(text, max_draws=5):
+    """解析多期开奖数据用于查奖（最多max_draws期）"""
+    lines = text.strip().split('\n')
+    draws = []
+    
+    for line in lines:
+        if len(draws) >= max_draws:
+            break
+        if not line.strip():
+            continue
+        
+        parts = line.replace(',', '\t').replace(' ', '\t').split('\t')
+        parts = [p.strip() for p in parts if p.strip()]
+        
+        if len(parts) >= 9:
+            try:
+                nums = []
+                for i in range(2, 9):
+                    if i < len(parts):
+                        num = int(float(parts[i]))
+                        nums.append(num)
+                
+                if len(nums) == 7:
+                    draws.append({
+                        'period': parts[0],
+                        'numbers': sorted(nums[:6]),
+                        'special': nums[6]
+                    })
+            except (ValueError, IndexError):
+                continue
+    
+    return draws
+
 def parse_excel_file(uploaded_file):
     """解析Excel文件"""
     try:
@@ -198,7 +231,8 @@ def calculate_scores(draws, window_total=100, window_short=20, window_recent=10)
     scores = {}
     for i in range(1, 50):
         z_freq = (freq[i] - freq_mean) / freq_std if freq_std > 0 else 0
-        z_absence = (absence[i] - absence_mean) / absence_std if absence_std > 0 else 0
+        # 缺席次数越高，得分越低（使用负值）
+        z_absence = (absence_mean - absence[i]) / absence_std if absence_std > 0 else 0
         z_short = (short_freq[i] - short_mean) / short_std if short_std > 0 else 0
         recent_active = 1 if i in recent_numbers else -1
         
@@ -243,7 +277,7 @@ def generate_combination(scores, num_count, target_sum=None, tolerance=15, requi
         if len(hot_pool) >= num_hot:
             selected.update(random.sample(hot_pool, num_hot))
         
-        # 从剩余号码中选满
+        # 从剩余号码中选满（避开前5冷码）
         remaining = [n for n in range(1, 50) if n not in selected and n not in cold_numbers[:5]]
         if len(remaining) < num_count - len(selected):
             continue
@@ -264,12 +298,15 @@ def generate_combination(scores, num_count, target_sum=None, tolerance=15, requi
         else:
             return nums, total
     
-    # 降级
+    # 降级 - 保留连号/跳号约束
     for _ in range(10000):
         nums = sorted(random.sample(range(1, 50), num_count))
         total = sum(nums)
         if target_sum is not None:
-            if min_sum <= total <= max_sum:
+            if not (min_sum <= total <= max_sum):
+                continue
+        if require_pattern:
+            if has_consecutive_or_jump(nums):
                 return nums, total
         else:
             return nums, total
@@ -368,6 +405,54 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, num_count, requ
             bets.append({'numbers': nums, 'sum': total, 'target': f'{trend}和值趋势(目标{target})', 'deviation': total - base_target})
     
     return bets
+
+def calculate_match_score(bet_numbers, draw_numbers, draw_special):
+    """计算一注号码与一期开奖的匹配分数
+    bet_numbers: 投注号码列表（前6个为正码，第7个为特码）
+    draw_numbers: 开奖正码列表
+    draw_special: 开奖特码
+    返回: 匹配分数（整数或 .5 格式的数值）
+    """
+    # 前6个为正码
+    bet_main = set(bet_numbers[:6])
+    draw_main = set(draw_numbers)
+    
+    # 计算正码匹配数
+    main_matches = len(bet_main & draw_main)
+    
+    # 检查特码匹配（第7个号码）
+    special_match = False
+    if len(bet_numbers) >= 7:
+        special_match = (bet_numbers[6] == draw_special)
+    
+    # 返回分数
+    if special_match:
+        return main_matches + 0.5
+    else:
+        return float(main_matches)
+
+def format_score_display(score):
+    """格式化分数显示
+    3.5 -> "3.5"
+    3.0 -> "3"
+    2.0 -> "2"
+    """
+    if score == int(score):
+        return str(int(score))
+    else:
+        return f"{score:.1f}"
+
+def calculate_match_score_for_draws(bet_numbers, check_draws):
+    """计算一注号码对多期开奖的匹配分数
+    bet_numbers: 投注号码列表
+    check_draws: 开奖数据列表（每期包含 numbers 和 special）
+    返回: 格式化后的分数列表（如 ["3", "3.5", "2"]）
+    """
+    results = []
+    for draw in check_draws:
+        score = calculate_match_score(bet_numbers, draw['numbers'], draw['special'])
+        results.append(format_score_display(score))
+    return results
 
 def calculate_prize(match_count, special_match):
     """根据匹配数计算奖金（6个正码）"""
@@ -753,6 +838,8 @@ if 'show_admin' not in st.session_state:
     st.session_state['show_admin'] = False
 if 'preview_draws' not in st.session_state:
     st.session_state['preview_draws'] = None
+if 'check_draws_data' not in st.session_state:
+    st.session_state['check_draws_data'] = None
 
 # ==================== 右上角齿轮图标 ====================
 col_title, col_settings = st.columns([0.95, 0.05])
@@ -784,7 +871,7 @@ with st.sidebar:
     with st.expander("🔥 冷热码计算公式", expanded=False):
         st.latex(r"""
         \text{Score}_i = 0.3 \cdot \frac{F_i - E}{\sigma_F} + 
-        0.3 \cdot \frac{A_i - \mu_A}{\sigma_A} + 
+        0.3 \cdot \frac{\mu_A - A_i}{\sigma_A} + 
         0.2 \cdot \frac{R_i - E_R}{\sigma_R} + 
         0.2 \cdot \text{Recent}_i
         """)
@@ -1034,6 +1121,73 @@ else:
     random_seed = int(use_dynamic_seed.split("种子")[1])
     seed_display = use_dynamic_seed
 
+# ==================== 多期查奖窗口 ====================
+st.markdown("---")
+st.markdown("### 🔍 多期查奖")
+
+# 创建两列布局：输入区域在左，说明在右
+check_col1, check_col2 = st.columns([2, 1])
+
+with check_col1:
+    check_draws_text = st.text_area(
+        "📋 粘贴多期开奖数据（最多5期）",
+        height=200,
+        placeholder="""示例格式：
+26045\t2026-04-25\t4\t16\t21\t36\t42\t46\t9
+26046\t2026-04-28\t5\t12\t18\t29\t35\t44\t7
+26047\t2026-05-02\t8\t14\t22\t31\t39\t47\t12
+
+支持制表符、逗号或空格分隔，最后一列为特码
+最多支持5期，超过5期将显示滚动条
+        """,
+        help="每期一行，格式：期次 日期 号码1 号码2 号码3 号码4 号码5 号码6 特码"
+    )
+    
+    parse_check_btn = st.button("📊 解析并查奖", key="parse_check_btn")
+
+with check_col2:
+    st.markdown("""
+    **📌 说明**
+    - 最后一列 = 特码
+    - 前6列 = 正码
+    - 最多粘贴 **5期**
+    - 超过5期自动滚动
+    
+    **中奖个数计算**
+    - 正码匹配 = 1分
+    - 特码匹配 = 0.5分
+    - 显示格式: `3` 或 `3.5`
+    """)
+
+if parse_check_btn and check_draws_text:
+    parsed = parse_multi_draws_for_checking(check_draws_text, max_draws=5)
+    if parsed:
+        st.session_state['check_draws_data'] = parsed
+        st.success(f"✅ 成功解析 {len(parsed)} 期数据")
+    else:
+        st.error("❌ 解析失败，请检查格式")
+        st.session_state['check_draws_data'] = None
+
+# 显示解析后的数据预览
+if st.session_state['check_draws_data']:
+    check_draws = st.session_state['check_draws_data']
+    
+    # 如果超过3期，使用容器加滚动条
+    if len(check_draws) > 3:
+        with st.container(height=200):
+            preview_df = pd.DataFrame([
+                {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
+                for d in check_draws
+            ])
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    else:
+        preview_df = pd.DataFrame([
+            {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
+            for d in check_draws
+        ])
+        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+# ==================== 生成投注按钮 ====================
 if st.button("🚀 生成智能投注", type="primary"):
     gen_scores, _, _, _ = calculate_scores(draws, window_total=use_analysis_periods)
     
@@ -1051,27 +1205,57 @@ if st.button("🚀 生成智能投注", type="primary"):
     - 趋势窗口: {trend_window}期
     """)
     
-    # 用表格显示
+    # 准备表格数据
     bets_data = []
-    base_target = get_target_sum_by_numbers_count(num_count)
     for i, bet in enumerate(bets, 1):
-        # 格式化号码显示（特码用括号标注）
-        if len(bet['numbers']) == 7:
-            numbers_display = f"{bet['numbers'][:6]} + [{bet['numbers'][6]}]"
-        else:
-            numbers_display = str(bet['numbers'])
+        # 格式化号码：7个号码平排，逗号分隔
+        numbers_display = ','.join(str(n) for n in bet['numbers'])
         
-        bets_data.append({
+        row = {
             '注数': i,
             '推荐号码': numbers_display,
             '和值': bet['sum'],
             '目标策略': bet['target'],
-            '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0",
-            '连号/跳号': "✅" if has_consecutive_or_jump(bet['numbers']) else "❌"
-        })
+            '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0"
+        }
+        
+        # 如果有查奖数据，添加中奖列
+        if st.session_state['check_draws_data']:
+            check_draws = st.session_state['check_draws_data']
+            match_scores = calculate_match_score_for_draws(bet['numbers'], check_draws)
+            
+            for idx, draw in enumerate(check_draws):
+                period_str = str(draw['period'])
+                # 截断过长的期次显示
+                if len(period_str) > 10:
+                    period_str = period_str[-10:]
+                row[f'中奖_{period_str}'] = match_scores[idx]
+        
+        bets_data.append(row)
     
     bets_df = pd.DataFrame(bets_data)
-    st.dataframe(bets_df, use_container_width=True, hide_index=True)
+    
+    # 重命名中奖列（去掉前缀，只显示期次）
+    rename_dict = {}
+    for col in bets_df.columns:
+        if col.startswith('中奖_'):
+            rename_dict[col] = col.replace('中奖_', '')
+    bets_df = bets_df.rename(columns=rename_dict)
+    
+    # 使用st.dataframe显示表格
+    st.dataframe(
+        bets_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "注数": st.column_config.NumberColumn("注数", format="%d"),
+            "推荐号码": st.column_config.TextColumn("推荐号码"),
+            "和值": st.column_config.NumberColumn("和值", format="%d"),
+            "目标策略": st.column_config.TextColumn("目标策略"),
+            "偏差": st.column_config.TextColumn("偏差"),
+            **{col: st.column_config.TextColumn(col) for col in bets_df.columns if col not in ['注数', '推荐号码', '和值', '目标策略', '偏差']}
+        }
+    )
     
     # 显示预测信息
     st.info(f"""
@@ -1085,7 +1269,7 @@ if st.button("🚀 生成智能投注", type="primary"):
     
     # 显示小提示
     if num_count == 7:
-        st.caption("💡 提示: 7个号码包含6个正码和1个特码，特码已用括号标注")
+        st.caption("💡 提示: 7个号码包含6个正码和1个特码，格式如: 1,2,3,4,5,6,7")
 
 # 页脚
 st.markdown("---")
