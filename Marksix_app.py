@@ -29,15 +29,17 @@ def init_supabase():
         return None
 
 def save_draws_to_supabase(draws):
-    """保存开奖数据到Supabase"""
+    """保存开奖数据到Supabase（覆盖保存）"""
     supabase = init_supabase()
     if supabase is None:
         return False
     
     try:
         table = supabase.schema('marksix_schema').table('marksix_draws')
+        # 先删除所有旧数据
         table.delete().neq("id", 0).execute()
         
+        # 批量插入新数据
         for draw in draws:
             data = {
                 "period": draw.get('period'),
@@ -403,21 +405,24 @@ def show_admin_page():
     with st.expander("🔧 管理员控制台", expanded=True):
         st.subheader("📁 历史数据管理")
         
-        # 显示当前数据状态
-        if st.session_state.get('draws') is not None:
-            st.success(f"✅ 当前已加载 {len(st.session_state['draws'])} 期数据 (来源: {st.session_state.get('data_source', 'unknown')})")
+        # 显示当前云端数据状态
+        current_draws = load_draws_from_supabase()
+        if current_draws:
+            st.success(f"✅ 当前云端有 {len(current_draws)} 期数据")
+            st.info(f"📊 数据范围: {current_draws[0].get('period')} 到 {current_draws[-1].get('period')}")
         else:
-            st.warning("⚠️ 暂无数据，请导入历史数据")
+            st.info("📭 云端暂无数据")
+        
+        st.markdown("---")
         
         # 数据导入方式
         admin_input_method = st.radio(
             "选择数据输入方式",
-            ["粘贴数据", "上传Excel文件", "从Supabase加载"],
+            ["粘贴数据", "上传Excel文件"],
             horizontal=True,
             key="admin_input"
         )
         
-        # 用于存储解析后的数据
         parsed_draws = None
         
         if admin_input_method == "粘贴数据":
@@ -438,17 +443,16 @@ def show_admin_page():
                 if st.button("预览数据", key="preview_pasted"):
                     parsed_draws = parse_pasted_data(admin_pasted)
                     if parsed_draws:
-                        st.session_state['parsed_draws'] = parsed_draws
+                        st.session_state['preview_draws'] = parsed_draws
                         st.success(f"成功解析 {len(parsed_draws)} 期数据")
                         st.dataframe(pd.DataFrame(parsed_draws[-20:]), use_container_width=True)
                     else:
                         st.error("数据解析失败")
                 
-                # 从session state获取已解析的数据
-                if st.session_state.get('parsed_draws') is not None:
-                    parsed_draws = st.session_state['parsed_draws']
+                if st.session_state.get('preview_draws') is not None:
+                    parsed_draws = st.session_state['preview_draws']
         
-        elif admin_input_method == "上传Excel文件":
+        else:  # 上传Excel
             admin_file = st.file_uploader(
                 "上传Excel文件",
                 type=['xlsx', 'xls'],
@@ -459,57 +463,35 @@ def show_admin_page():
                 if st.button("预览数据", key="preview_excel"):
                     parsed_draws = parse_excel_file(admin_file)
                     if parsed_draws:
-                        st.session_state['parsed_draws'] = parsed_draws
+                        st.session_state['preview_draws'] = parsed_draws
                         st.success(f"成功解析 {len(parsed_draws)} 期数据")
                         st.dataframe(pd.DataFrame(parsed_draws[-20:]), use_container_width=True)
                     else:
                         st.error("数据解析失败")
                 
-                if st.session_state.get('parsed_draws') is not None:
-                    parsed_draws = st.session_state['parsed_draws']
+                if st.session_state.get('preview_draws') is not None:
+                    parsed_draws = st.session_state['preview_draws']
         
-        else:  # 从Supabase加载
-            if st.button("从Supabase加载数据", key="load_from_supabase"):
-                with st.spinner("正在加载..."):
-                    parsed_draws = load_draws_from_supabase()
-                    if parsed_draws:
-                        st.session_state['parsed_draws'] = parsed_draws
-                        st.success(f"成功从Supabase加载 {len(parsed_draws)} 期数据")
-                        st.dataframe(pd.DataFrame(parsed_draws[-20:]), use_container_width=True)
-                    else:
-                        st.error("加载失败")
-            
-            if st.session_state.get('parsed_draws') is not None:
-                parsed_draws = st.session_state['parsed_draws']
-        
-        # 保存按钮区域
-        if parsed_draws is not None or st.session_state.get('parsed_draws') is not None:
-            if parsed_draws is None:
-                parsed_draws = st.session_state['parsed_draws']
-            
+        # 保存到 Supabase
+        if parsed_draws:
             st.markdown("---")
-            st.subheader("💾 保存数据")
+            st.subheader("💾 保存到云端")
             
-            col1, col2, col3 = st.columns([1, 1, 1])
+            col1, col2 = st.columns([1, 1])
             with col1:
-                if st.button("💾 保存数据到本地", type="primary", key="save_local"):
-                    st.session_state['draws'] = parsed_draws
-                    st.session_state['data_source'] = admin_input_method
-                    st.success(f"成功保存 {len(parsed_draws)} 期数据到本地！")
-                    st.rerun()
-            
-            with col2:
-                if st.button("☁️ 保存数据到Supabase", key="save_supabase"):
+                if st.button("☁️ 保存到Supabase", type="primary", key="save_to_supabase"):
                     with st.spinner("正在保存..."):
                         if save_draws_to_supabase(parsed_draws):
                             st.success(f"成功保存 {len(parsed_draws)} 期数据到Supabase！")
+                            st.session_state['preview_draws'] = None
                             st.balloons()
+                            st.rerun()
                         else:
                             st.error("保存失败")
             
-            with col3:
-                if st.button("❌ 关闭", key="close_admin"):
-                    st.session_state['show_admin'] = False
+            with col2:
+                if st.button("❌ 取消", key="cancel_save"):
+                    st.session_state['preview_draws'] = None
                     st.rerun()
         
         st.markdown("---")
@@ -517,11 +499,12 @@ def show_admin_page():
         # ==================== 策略回测 ====================
         st.subheader("📊 策略回测")
         
-        if st.session_state.get('draws') is None:
-            st.warning("请先导入并保存数据到本地，再进行回测")
+        # 直接从 Supabase 加载数据进行回测
+        draws = load_draws_from_supabase()
+        
+        if draws is None or len(draws) == 0:
+            st.warning("请先保存数据到Supabase，再进行回测")
         else:
-            draws = st.session_state['draws']
-            
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
@@ -603,6 +586,7 @@ def show_admin_page():
                         - 净收益: **${total_prize - total_cost}**
                         """)
                         
+                        # 匹配数分布
                         match_dist = results_df['最佳匹配数'].value_counts().sort_index()
                         fig_match = px.bar(
                             x=match_dist.index, y=match_dist.values,
@@ -619,14 +603,10 @@ def show_admin_page():
 # ==================== 初始化session state ====================
 if 'admin_logged_in' not in st.session_state:
     st.session_state['admin_logged_in'] = False
-if 'draws' not in st.session_state:
-    st.session_state['draws'] = None
-if 'data_source' not in st.session_state:
-    st.session_state['data_source'] = None
 if 'show_admin' not in st.session_state:
     st.session_state['show_admin'] = False
-if 'parsed_draws' not in st.session_state:
-    st.session_state['parsed_draws'] = None
+if 'preview_draws' not in st.session_state:
+    st.session_state['preview_draws'] = None
 
 # ==================== 右上角齿轮图标 ====================
 col_title, col_settings = st.columns([0.95, 0.05])
@@ -698,12 +678,18 @@ with st.sidebar:
 
 st.title("🎯 六合彩AI智能选号工具")
 
-# 检查是否有数据
-if st.session_state.get('draws') is None:
+# 直接从 Supabase 加载数据
+@st.cache_data(ttl=60, show_spinner="从云端加载数据...")
+def get_draws_from_cloud():
+    return load_draws_from_supabase()
+
+draws = get_draws_from_cloud()
+
+if draws is None or len(draws) == 0:
     st.info("👈 请点击右上角齿轮图标，进入管理员页面导入历史数据")
     st.stop()
 
-draws = st.session_state['draws']
+st.success(f"✅ 已加载 {len(draws)} 期数据")
 
 # ==================== 冷热码分析 ====================
 st.subheader("🔥 冷热码分析")
@@ -844,9 +830,7 @@ if st.button("🚀 生成智能投注", type="primary"):
             st.caption(f"包含连号/跳号: {'✅ 是' if has_pattern else '❌ 否'}")
             st.divider()
     
-    st.info("预测信息: 使用最近 {} 期数据进行分析 | 策略: {} | 共生成 {} 注".format(
-        use_analysis_periods, strategy, num_bets
-    ))
+    st.info(f"预测信息: 使用最近 {use_analysis_periods} 期数据进行分析 | 策略: {strategy} | 共生成 {num_bets} 注")
 
 # 页脚
 st.markdown("---")
