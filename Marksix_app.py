@@ -6,6 +6,8 @@ import random
 from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
+import hashlib
+import hmac
 
 # 页面配置
 st.set_page_config(
@@ -14,54 +16,118 @@ st.set_page_config(
     layout="wide"
 )
 
-# ==================== 理论介绍（左侧边栏） ====================
-with st.sidebar:
-    st.title("🎰 六合彩AI分析工具")
-    st.markdown("---")
-    
-    with st.expander("📖 中央趋向定理", expanded=False):
-        st.markdown("""
-        - 从49个球抽取7个球，和值呈正态分布
-        - 理论和值: (1+49)/2 * 7 = 175
-        - 标准差: 约 35
-        - 约68%的组合和值在 140-210 之间
-        """)
-    
-    with st.expander("🔥 冷热码计算公式", expanded=False):
-        st.latex(r"""
-        \text{Score}_i = 0.3 \cdot \frac{F_i - E}{\sigma_F} + 
-        0.3 \cdot \frac{A_i - \mu_A}{\sigma_A} + 
-        0.2 \cdot \frac{R_i - E_R}{\sigma_R} + 
-        0.2 \cdot \text{Recent}_i
-        """)
-        st.markdown("""
-        | 参数 | 含义 |
-        |------|------|
-        | F_i | 历史总频次 |
-        | A_i | 当前缺席次数 |
-        | R_i | 短期频次(20期) |
-        | Recent_i | 近10期是否出现 |
-        """)
-    
-    with st.expander("📊 连号/跳号概率", expanded=False):
-        st.markdown("""
-        - 至少一对连号: 55.6%
-        - 至少一对跳号: 65%
-        - 同时包含: 约35%
-        """)
-    
-    with st.expander("💰 奖金结构", expanded=False):
-        st.markdown("""
-        | 等级 | 匹配 | 奖金 |
-        |------|------|------|
-        | 第1组 | 7 | 45%基金 |
-        | 第2组 | 6+特 | 15%基金 |
-        | 第3组 | 6 | 40%基金 |
-        | 第4组 | 5+特 | $9,600 |
-        | 第5组 | 5 | $640 |
-        | 第6组 | 4+特 | $320 |
-        | 第7组 | 4 | $40 |
-        """)
+# ==================== 管理员验证函数 ====================
+def check_password(password):
+    """验证管理员密码"""
+    # 使用安全的比较方式
+    return hmac.compare_digest(password, "Ku_product$2026")
+
+def admin_login():
+    """管理员登录界面"""
+    with st.form("admin_login_form"):
+        username = st.text_input("用户名")
+        password = st.text_input("密码", type="password")
+        submitted = st.form_submit_button("登录")
+        
+        if submitted:
+            if username == "Laurence_ku" and check_password(password):
+                st.session_state['admin_logged_in'] = True
+                st.success("登录成功！")
+                st.rerun()
+            else:
+                st.error("用户名或密码错误")
+
+def admin_logout():
+    """管理员登出"""
+    if st.button("退出登录", key="logout_btn"):
+        st.session_state['admin_logged_in'] = False
+        st.rerun()
+
+# ==================== 初始化session state ====================
+if 'admin_logged_in' not in st.session_state:
+    st.session_state['admin_logged_in'] = False
+if 'draws' not in st.session_state:
+    st.session_state['draws'] = None
+if 'data_source' not in st.session_state:
+    st.session_state['data_source'] = None
+
+# ==================== 右上角齿轮图标 ====================
+col_title, col_settings = st.columns([0.95, 0.05])
+with col_settings:
+    if st.button("⚙️", key="settings_icon", help="管理员设置"):
+        st.session_state['show_admin'] = not st.session_state.get('show_admin', False)
+
+# 管理员弹窗
+if st.session_state.get('show_admin', False):
+    with st.expander("🔐 管理员入口", expanded=True):
+        if not st.session_state['admin_logged_in']:
+            admin_login()
+        else:
+            st.success("✅ 已登录管理员模式")
+            admin_logout()
+            
+            st.markdown("---")
+            st.subheader("📁 历史数据管理")
+            
+            # 数据输入方式
+            admin_input_method = st.radio(
+                "选择数据输入方式",
+                ["粘贴数据", "上传Excel文件"],
+                horizontal=True,
+                key="admin_input"
+            )
+            
+            if admin_input_method == "粘贴数据":
+                st.markdown("""
+                **数据格式**: 每期一行，用制表符或逗号分隔
+                期次 日期 B1 B2 B3 B4 B5 B6 B7
+                示例: 26045 2026-04-25 4 16 21 36 42 46 9
+                """)
+                
+                admin_pasted = st.text_area(
+                    "粘贴历史数据",
+                    height=400,
+                    key="admin_pasted",
+                    help="支持制表符、逗号或空格分隔"
+                )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("保存数据", type="primary", key="save_pasted"):
+                        if admin_pasted:
+                            draws = parse_pasted_data(admin_pasted)
+                            if draws:
+                                st.session_state['draws'] = draws
+                                st.session_state['data_source'] = 'pasted'
+                                st.success(f"成功保存 {len(draws)} 期数据")
+                                st.rerun()
+                            else:
+                                st.error("数据解析失败")
+                
+            else:
+                admin_file = st.file_uploader(
+                    "上传Excel文件",
+                    type=['xlsx', 'xls'],
+                    key="admin_file"
+                )
+                
+                if admin_file:
+                    draws = parse_excel_file(admin_file)
+                    if draws:
+                        if st.button("保存数据", key="save_excel"):
+                            st.session_state['draws'] = draws
+                            st.session_state['data_source'] = 'excel'
+                            st.success(f"成功保存 {len(draws)} 期数据")
+                            st.rerun()
+            
+            # 显示当前数据状态
+            if st.session_state['draws']:
+                st.info(f"当前已加载 {len(st.session_state['draws'])} 期数据 (来源: {st.session_state['data_source']})")
+                
+                if st.button("清除数据", key="clear_data"):
+                    st.session_state['draws'] = None
+                    st.session_state['data_source'] = None
+                    st.rerun()
 
 # ==================== 核心函数 ====================
 
@@ -248,79 +314,103 @@ def predict_trend(draws, window=5):
     else:
         return 175
 
-def generate_optimal_bets(draws, num_bets, scores):
-    """根据用户输入的注数，生成最优投注组合"""
+def generate_bets_by_strategy(draws, scores, num_bets, strategy, analysis_periods):
+    """根据策略生成投注"""
     bets = []
     
-    if num_bets == 1:
-        nums, total = generate_combination(scores, 175)
-        bets.append({'numbers': nums, 'sum': total, 'strategy': '中和值'})
+    # 使用指定期数的数据
+    recent_draws = draws[-analysis_periods:] if analysis_periods <= len(draws) else draws
     
-    elif num_bets == 2:
-        nums1, total1 = generate_combination(scores, 155)
-        nums2, total2 = generate_combination(scores, 195)
-        bets.append({'numbers': nums1, 'sum': total1, 'strategy': '小和值'})
-        bets.append({'numbers': nums2, 'sum': total2, 'strategy': '大和值'})
+    if strategy == "和值大中小":
+        # 大中小各一
+        if num_bets >= 1:
+            nums, total = generate_combination(scores, 155)
+            bets.append({'numbers': nums, 'sum': total, 'target': '小和值(155)', 'deviation': total - 175})
+        if num_bets >= 2:
+            nums, total = generate_combination(scores, 175)
+            bets.append({'numbers': nums, 'sum': total, 'target': '中和值(175)', 'deviation': total - 175})
+        if num_bets >= 3:
+            nums, total = generate_combination(scores, 195)
+            bets.append({'numbers': nums, 'sum': total, 'target': '大和值(195)', 'deviation': total - 175})
+        # 剩余注数用中和值填充
+        for i in range(3, num_bets):
+            nums, total = generate_combination(scores, 175)
+            bets.append({'numbers': nums, 'sum': total, 'target': f'中和值(175) 补充{i-2}', 'deviation': total - 175})
     
-    elif num_bets == 3:
-        nums1, total1 = generate_combination(scores, 155)
-        nums2, total2 = generate_combination(scores, 175)
-        nums3, total3 = generate_combination(scores, 195)
-        bets.append({'numbers': nums1, 'sum': total1, 'strategy': '小和值'})
-        bets.append({'numbers': nums2, 'sum': total2, 'strategy': '中和值'})
-        bets.append({'numbers': nums3, 'sum': total3, 'strategy': '大和值'})
+    elif strategy == "和值趋势预测":
+        # 根据最近和值趋势预测
+        trend_target = predict_trend(recent_draws)
+        for i in range(num_bets):
+            # 添加轻微随机偏移
+            offset = random.randint(-10, 10)
+            target = trend_target + offset
+            target = max(140, min(210, target))
+            nums, total = generate_combination(scores, target)
+            bets.append({'numbers': nums, 'sum': total, 'target': f'趋势预测(目标{target})', 'deviation': total - 175})
     
-    else:
-        nums1, total1 = generate_combination(scores, 155)
-        nums2, total2 = generate_combination(scores, 175)
-        nums3, total3 = generate_combination(scores, 195)
-        bets = [
-            {'numbers': nums1, 'sum': total1, 'strategy': '小和值'},
-            {'numbers': nums2, 'sum': total2, 'strategy': '中和值'},
-            {'numbers': nums3, 'sum': total3, 'strategy': '大和值'}
-        ]
-        
-        for i in range(num_bets - 3):
-            trend_target = predict_trend(draws)
-            nums, total = generate_combination(scores, trend_target)
-            bets.append({'numbers': nums, 'sum': total, 'strategy': f'趋势预测(目标{trend_target})'})
+    else:  # 混合策略
+        # 一半大中小，一半趋势预测
+        half = num_bets // 2
+        # 大中小
+        if half >= 1:
+            nums, total = generate_combination(scores, 155)
+            bets.append({'numbers': nums, 'sum': total, 'target': '小和值(155)', 'deviation': total - 175})
+        if half >= 2:
+            nums, total = generate_combination(scores, 175)
+            bets.append({'numbers': nums, 'sum': total, 'target': '中和值(175)', 'deviation': total - 175})
+        if half >= 3:
+            nums, total = generate_combination(scores, 195)
+            bets.append({'numbers': nums, 'sum': total, 'target': '大和值(195)', 'deviation': total - 175})
+        # 趋势预测
+        trend_target = predict_trend(recent_draws)
+        for i in range(num_bets - half):
+            offset = random.randint(-10, 10)
+            target = trend_target + offset
+            target = max(140, min(210, target))
+            nums, total = generate_combination(scores, target)
+            bets.append({'numbers': nums, 'sum': total, 'target': f'趋势预测(目标{target})', 'deviation': total - 175})
     
     return bets
 
 def calculate_prize(match_count, special_match):
     """根据匹配数计算奖金"""
     if match_count == 6:
-        return "第1组 (45%基金)"
+        return "第1组 (45%基金)", 0  # 金额不确定
     elif match_count == 5 and special_match:
-        return "第2组 (15%基金)"
+        return "第2组 (15%基金)", 0
     elif match_count == 5:
-        return "第3组 (40%基金)"
+        return "第3组 (40%基金)", 0
     elif match_count == 4 and special_match:
-        return "第4组 ($9,600)"
+        return "第4组 ($9,600)", 9600
     elif match_count == 4:
-        return "第5组 ($640)"
+        return "第5组 ($640)", 640
     elif match_count == 3 and special_match:
-        return "第6组 ($320)"
+        return "第6组 ($320)", 320
     elif match_count == 3:
-        return "第7组 ($40)"
+        return "第7组 ($40)", 40
     else:
-        return "无中奖"
+        return "无中奖", 0
 
-def backtest(draws, scores, num_bets_per_draw=4):
+def backtest(draws, scores, num_bets_per_draw, strategy, analysis_periods, train_periods=100):
     """回测策略"""
     results = []
-    min_train = min(100, len(draws) // 2)
+    min_train = min(train_periods, len(draws) - 10)
     
     for i in range(min_train, len(draws)):
+        # 使用前i期数据训练
         train_draws = draws[:i]
         test_draw = draws[i]
         
-        train_scores, _, _, _ = calculate_scores(train_draws)
-        bets = generate_optimal_bets(train_draws, num_bets_per_draw, train_scores)
+        # 重新计算得分（使用分析期数）
+        train_scores, _, _, _ = calculate_scores(train_draws, window_total=analysis_periods)
+        
+        # 生成投注
+        bets = generate_bets_by_strategy(train_draws, train_scores, num_bets_per_draw, strategy, analysis_periods)
         
         best_match = 0
         best_special_match = False
         best_prize = "无中奖"
+        best_amount = 0
         
         for bet in bets:
             match_count = len(set(bet['numbers']) & set(test_draw['numbers']))
@@ -329,7 +419,7 @@ def backtest(draws, scores, num_bets_per_draw=4):
             if match_count > best_match or (match_count == best_match and special_match):
                 best_match = match_count
                 best_special_match = special_match
-                best_prize = calculate_prize(match_count, special_match)
+                best_prize, best_amount = calculate_prize(match_count, special_match)
         
         results.append({
             '期次': test_draw.get('period', i+1),
@@ -337,219 +427,291 @@ def backtest(draws, scores, num_bets_per_draw=4):
             '真实和值': test_draw['sum'],
             '最佳匹配数': best_match,
             '特别号匹配': best_special_match,
-            '中奖等级': best_prize
+            '中奖等级': best_prize,
+            '奖金': best_amount
         })
     
     return pd.DataFrame(results)
+
+# ==================== 理论介绍（左侧边栏） ====================
+with st.sidebar:
+    st.title("🎰 六合彩AI分析工具")
+    st.markdown("---")
+    
+    with st.expander("📖 中央趋向定理", expanded=False):
+        st.markdown("""
+        - 从49个球抽取7个球，和值呈正态分布
+        - 理论和值: (1+49)/2 * 7 = 175
+        - 标准差: 约 35
+        - 约68%的组合和值在 140-210 之间
+        """)
+    
+    with st.expander("🔥 冷热码计算公式", expanded=False):
+        st.latex(r"""
+        \text{Score}_i = 0.3 \cdot \frac{F_i - E}{\sigma_F} + 
+        0.3 \cdot \frac{A_i - \mu_A}{\sigma_A} + 
+        0.2 \cdot \frac{R_i - E_R}{\sigma_R} + 
+        0.2 \cdot \text{Recent}_i
+        """)
+        st.markdown("""
+        | 参数 | 含义 |
+        |------|------|
+        | F_i | 历史总频次 |
+        | A_i | 当前缺席次数 |
+        | R_i | 短期频次(20期) |
+        | Recent_i | 近10期是否出现 |
+        """)
+    
+    with st.expander("📊 连号/跳号概率", expanded=False):
+        st.markdown("""
+        - 至少一对连号: 55.6%
+        - 至少一对跳号: 65%
+        - 同时包含: 约35%
+        """)
+    
+    with st.expander("💰 奖金结构", expanded=False):
+        st.markdown("""
+        | 等级 | 匹配 | 奖金 |
+        |------|------|------|
+        | 第1组 | 6 | 45%基金 |
+        | 第2组 | 5+特 | 15%基金 |
+        | 第3组 | 5 | 40%基金 |
+        | 第4组 | 4+特 | $9,600 |
+        | 第5组 | 4 | $640 |
+        | 第6组 | 3+特 | $320 |
+        | 第7组 | 3 | $40 |
+        """)
+    
+    st.markdown("---")
+    st.caption("DFSS智能选号工具 v1.0")
 
 # ==================== 主页面 ====================
 
 st.title("🎯 六合彩AI智能选号工具")
 
-# 数据输入方式选择
-st.subheader("📁 数据输入")
-input_method = st.radio(
-    "选择输入方式",
-    ["📋 粘贴数据", "📁 上传Excel文件"],
-    horizontal=True
+# 检查是否有数据
+if st.session_state['draws'] is None:
+    st.warning("⚠️ 请先点击右上角齿轮图标，进入管理员页面导入历史数据")
+    st.stop()
+
+draws = st.session_state['draws']
+
+# ==================== 冷热码分析 ====================
+st.subheader("🔥 冷热码分析")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    analysis_periods = st.number_input(
+        "分析期数",
+        min_value=10,
+        max_value=min(500, len(draws)),
+        value=min(100, len(draws)),
+        step=10,
+        help="使用最近N期数据计算冷热码"
+    )
+
+with col2:
+    st.write("")
+    st.write("")
+
+# 计算冷热码
+scores, freq, short_freq, absence = calculate_scores(draws, window_total=analysis_periods)
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.markdown("**🔥 热门号码 (Top 10)**")
+    hot_df = pd.DataFrame([
+        {'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]}
+        for num in sorted(scores, key=scores.get, reverse=True)[:10]
+    ])
+    st.dataframe(hot_df, use_container_width=True)
+
+with col2:
+    st.markdown("**❄️ 冷门号码 (Bottom 10)**")
+    cold_df = pd.DataFrame([
+        {'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]}
+        for num in sorted(scores, key=scores.get)[:10]
+    ])
+    st.dataframe(cold_df, use_container_width=True)
+
+with col3:
+    st.markdown("**📈 近期活跃**")
+    recent_active = [num for num in range(1, 50) if any(num in draw['numbers'] for draw in draws[-10:])]
+    st.write(f"近10期出现过的号码: **{len(recent_active)}个**")
+    st.write(sorted(recent_active)[:15], "...")
+    if len(recent_active) > 15:
+        st.write(f"... 共{len(recent_active)}个")
+
+# ==================== 和值趋势分析 ====================
+st.subheader("📈 和值趋势分析")
+
+# 可以选择显示期数
+show_periods = st.slider(
+    "显示最近期数",
+    min_value=10,
+    max_value=min(200, len(draws)),
+    value=min(100, len(draws)),
+    step=10
 )
 
-draws = None
+sum_df = pd.DataFrame([
+    {'期次': i+1, '和值': draw['sum']}
+    for i, draw in enumerate(draws[-show_periods:])
+])
 
-if input_method == "📋 粘贴数据":
-    st.markdown("""
-    **数据格式说明**: 每期一行，格式如下
-    期次 日期 B1 B2 B3 B4 B5 B6 B7
-    26045 2026-04-25 4 16 21 36 42 46 9
-    支持制表符、逗号或空格分隔，至少需要8列
-    """)
-    
-    example_data = """26045	2026-04-25	4	16	21	36	42	46	9
-26044	2026-04-23	12	23	37	38	45	48	8
-26043	2026-04-21	2	4	10	11	26	44	40
-26042	2026-04-18	17	20	27	32	39	46	34
-26041	2026-04-16	6	12	14	28	44	46	15
-26040	2026-04-14	8	19	22	33	44	46	18
-26039	2026-04-11	11	14	17	28	40	42	2
-26038	2026-04-09	13	16	24	43	44	45	40
-26037	2026-04-07	8	23	25	29	33	34	49
-26036	2026-04-04	20	28	32	35	40	45	43"""
-    
-    pasted_text = st.text_area(
-        "粘贴开奖数据",
-        value=example_data,
-        height=300,
-        help="每期一行，至少包含期次、日期、B1-B7共9列"
+fig = px.line(sum_df, x='期次', y='和值', title=f'最近{show_periods}期和值走势')
+fig.add_hline(y=175, line_dash="dash", line_color="red", annotation_text="理论均值(175)")
+fig.add_hrect(y0=140, y1=210, line_width=0, fillcolor="green", opacity=0.1, annotation_text="约68%区间")
+st.plotly_chart(fig, use_container_width=True)
+
+# 和值统计
+sum_stats = pd.DataFrame([draw['sum'] for draw in draws[-show_periods:]], columns=['和值'])
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("平均和值", f"{sum_stats['和值'].mean():.1f}")
+with col2:
+    st.metric("最大和值", f"{sum_stats['和值'].max()}")
+with col3:
+    st.metric("最小和值", f"{sum_stats['和值'].min()}")
+with col4:
+    st.metric("标准差", f"{sum_stats['和值'].std():.1f}")
+
+# ==================== 智能投注生成 ====================
+st.subheader("🎲 智能投注生成")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    num_bets = st.number_input(
+        "购买注数",
+        min_value=1,
+        max_value=10,
+        value=4,
+        step=1,
+        help="每次购买多少注"
     )
-    
-    if pasted_text:
-        lines = pasted_text.strip().split('\n')
-        preview_lines = lines[:30]
-        
-        st.markdown(f"**数据预览** (共 {len(lines)} 期，显示前 {min(30, len(lines))} 期)")
-        
-        preview_data = []
-        for line in preview_lines:
-            parts = line.replace(',', '\t').replace(' ', '\t').split('\t')
-            parts = [p.strip() for p in parts if p.strip()]
-            if len(parts) >= 9:
-                preview_data.append({
-                    '期次': parts[0],
-                    '日期': parts[1],
-                    'B1': parts[2], 'B2': parts[3], 'B3': parts[4],
-                    'B4': parts[5], 'B5': parts[6], 'B6': parts[7], 'B7': parts[8]
-                })
-        
-        if preview_data:
-            preview_df = pd.DataFrame(preview_data)
-            st.dataframe(preview_df, use_container_width=True, height=400)
-        
-        if len(lines) > 30:
-            st.caption(f"还有 {len(lines) - 30} 期未显示，可滚动上方文本框查看全部")
-        
-        if st.button("确认并解析数据", type="primary"):
-            draws = parse_pasted_data(pasted_text)
-            if draws and len(draws) > 0:
-                st.success(f"成功解析 {len(draws)} 期数据")
-            else:
-                st.error("解析失败，请检查数据格式")
 
-else:
-    uploaded_file = st.file_uploader("上传历史开奖数据 (Excel格式)", type=['xlsx', 'xls'])
-    if uploaded_file is not None:
-        draws = parse_excel_file(uploaded_file)
-        if draws and len(draws) > 0:
-            st.success(f"成功加载 {len(draws)} 期数据")
+with col2:
+    strategy = st.selectbox(
+        "购买策略",
+        ["和值大中小", "和值趋势预测", "混合策略"],
+        help="和值大中小: 覆盖小(155)、中(175)、大(195)和值区间\n和值趋势预测: 根据最近和值趋势预测\n混合策略: 结合两者"
+    )
+
+with col3:
+    use_analysis_periods = st.number_input(
+        "分析期数",
+        min_value=10,
+        max_value=min(500, len(draws)),
+        value=min(100, len(draws)),
+        step=10,
+        key="gen_periods",
+        help="使用最近N期数据计算冷热码"
+    )
+
+if st.button("🚀 生成智能投注", type="primary"):
+    # 重新计算得分
+    gen_scores, _, _, _ = calculate_scores(draws, window_total=use_analysis_periods)
+    
+    # 生成投注
+    bets = generate_bets_by_strategy(draws, gen_scores, num_bets, strategy, use_analysis_periods)
+    
+    st.markdown("### 📝 推荐投注组合")
+    
+    for i, bet in enumerate(bets, 1):
+        with st.container():
+            st.markdown(f"**第{i}注**")
+            col_a, col_b, col_c, col_d = st.columns([2, 1, 1, 1])
+            with col_a:
+                st.write(f"号码: {bet['numbers']}")
+            with col_b:
+                st.write(f"和值: {bet['sum']}")
+            with col_c:
+                st.write(f"目标: {bet['target']}")
+            with col_d:
+                dev = bet['deviation']
+                color = "🟢" if abs(dev) < 15 else "🟡" if abs(dev) < 30 else "🔴"
+                st.write(f"偏差: {color} {dev:+d}")
             
-            with st.expander("数据预览 (前30期)"):
-                preview_df = pd.DataFrame([
-                    {'期次': draw.get('period', i+1), '号码': draw['numbers'], '和值': draw['sum'], '特别号': draw.get('special', '')}
-                    for i, draw in enumerate(draws[:30])
-                ])
-                st.dataframe(preview_df, use_container_width=True)
-                if len(draws) > 30:
-                    st.caption(f"还有 {len(draws) - 30} 期未显示")
+            has_pattern = has_consecutive_or_jump(bet['numbers'])
+            st.caption(f"包含连号/跳号: {'✅ 是' if has_pattern else '❌ 否'}")
+            st.divider()
+    
+    # 预测信息
+    st.info(f"""
+    📊 **预测信息**
+    - 使用最近 {use_analysis_periods} 期数据进行分析
+    - 当前策略: {strategy}
+    - 共生成 {num_bets} 注推荐号码
+    - 每注均经过热码优先 + 和值约束 + 连号/跳号筛选
+    """)
 
-if draws and len(draws) > 0:
-    st.markdown("---")
-    
-    scores, freq, short_freq, absence = calculate_scores(draws)
-    
-    st.subheader("🔥 冷热码分析")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("**热门号码 (Top 10)**")
-        hot_df = pd.DataFrame([
-            {'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]}
-            for num in sorted(scores, key=scores.get, reverse=True)[:10]
-        ])
-        st.dataframe(hot_df, use_container_width=True)
-    
-    with col2:
-        st.markdown("**冷门号码 (Bottom 10)**")
-        cold_df = pd.DataFrame([
-            {'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]}
-            for num in sorted(scores, key=scores.get)[:10]
-        ])
-        st.dataframe(cold_df, use_container_width=True)
-    
-    with col3:
-        st.markdown("**近期活跃**")
-        recent_active = [num for num in range(1, 50) if any(num in draw['numbers'] for draw in draws[-10:])]
-        st.write(f"近10期出现过的号码: {len(recent_active)}个")
-        st.write(sorted(recent_active)[:15], "...")
-    
-    st.subheader("📈 和值趋势分析")
-    sum_df = pd.DataFrame([
-        {'期次': i+1, '和值': draw['sum']}
-        for i, draw in enumerate(draws)
-    ])
-    fig = px.line(sum_df, x='期次', y='和值', title='历史和值走势')
-    fig.add_hline(y=175, line_dash="dash", line_color="red", annotation_text="理论均值(175)")
-    fig.add_hrect(y0=140, y1=210, line_width=0, fillcolor="green", opacity=0.1, annotation_text="约68%区间")
-    st.plotly_chart(fig, use_container_width=True)
-    
-    st.subheader("🎲 智能投注生成")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        num_bets = st.number_input("请输入投注注数", min_value=1, max_value=10, value=4, step=1)
-    with col2:
-        st.markdown("**策略说明**")
-        if num_bets == 1:
-            st.info("单注: 中和值(175) + 热码优先 + 连号/跳号")
-        elif num_bets == 2:
-            st.info("两注: 小和值(155) + 大和值(195)")
-        elif num_bets == 3:
-            st.info("三注: 小(155) + 中(175) + 大(195)")
-        else:
-            st.info(f"{num_bets}注: 大中小各一 + {num_bets-3}注趋势预测")
-    
-    if st.button("生成智能投注", type="primary"):
-        bets = generate_optimal_bets(draws, num_bets, scores)
-        
-        st.markdown("### 推荐投注组合")
-        
-        for i, bet in enumerate(bets, 1):
-            with st.container():
-                st.markdown(f"**第{i}注** - 策略: {bet['strategy']}")
-                col_a, col_b, col_c = st.columns([2, 1, 1])
-                with col_a:
-                    st.write(f"号码: {bet['numbers']}")
-                with col_b:
-                    st.write(f"和值: {bet['sum']}")
-                with col_c:
-                    diff_val = bet['sum'] - 175
-                    st.write(f"偏差: {diff_val:+d}")
+# ==================== 策略回测 ====================
+st.subheader("📊 策略回测")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    backtest_bets = st.number_input(
+        "回测注数",
+        min_value=1,
+        max_value=10,
+        value=4,
+        step=1,
+        key="backtest_bets"
+    )
+
+with col2:
+    backtest_strategy = st.selectbox(
+        "回测策略",
+        ["和值大中小", "和值趋势预测", "混合策略"],
+        key="backtest_strategy"
+    )
+
+with col3:
+    backtest_analysis_periods = st.number_input(
+        "分析期数",
+        min_value=10,
+        max_value=min(500, len(draws)),
+        value=min(100, len(draws)),
+        step=10,
+        key="backtest_periods",
+        help="回测时使用最近N期数据计算冷热码"
+    )
+
+with col4:
+    train_periods = st.number_input(
+        "训练期数",
+        min_value=20,
+        max_value=min(300, len(draws) - 10),
+        value=min(100, len(draws) - 10),
+        step=10,
+        help="用前N期训练，之后期数回测"
+    )
+
+run_backtest = st.button("▶️ 运行回测", type="secondary")
+
+if run_backtest:
+    with st.spinner("正在运行回测..."):
+        if len(draws) > train_periods + 10:
+            results_df = backtest(
+                draws, scores, backtest_bets, backtest_strategy, 
+                backtest_analysis_periods, train_periods
+            )
+            
+            if len(results_df) > 0:
+                st.markdown("### 📈 回测结果统计")
                 
-                has_pattern = has_consecutive_or_jump(bet['numbers'])
-                st.caption(f"包含连号/跳号: {'是' if has_pattern else '否'}")
-                st.divider()
-        
-        st.info("""
-        **关于预测赢率**:
-        - 本工具基于历史数据统计，预测中奖率约 6-7% (中3个或以上)
-        - 实际中奖率受随机性影响，长期期望值仍为负
-        - 建议理性投注，量力而行
-        """)
-    
-    st.subheader("📊 策略回测")
-    
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        backtest_bets = st.number_input("回测投注注数", min_value=1, max_value=10, value=4, step=1, key="backtest")
-        run_backtest = st.button("运行回测", type="secondary")
-    
-    with col2:
-        st.info("回测使用前100期训练，预测后续所有期次")
-    
-    if run_backtest:
-        with st.spinner("正在运行回测..."):
-            if len(draws) > 100:
-                results_df = backtest(draws, scores, backtest_bets)
-                
-                st.markdown("### 回测结果统计")
-                
-                stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+                stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
                 
                 total_draws_count = len(results_df)
                 winning_draws_count = results_df[results_df['中奖等级'] != '无中奖'].shape[0]
                 avg_match_val = results_df['最佳匹配数'].mean()
                 
-                prize_map = {
-                    '第4组 ($9,600)': 9600,
-                    '第5组 ($640)': 640,
-                    '第6组 ($320)': 320,
-                    '第7组 ($40)': 40,
-                }
-                
-                total_prize = 0
-                for prize in results_df['中奖等级']:
-                    if prize in prize_map:
-                        total_prize += prize_map[prize]
-                
+                # 计算奖金
+                total_prize = results_df['奖金'].sum()
                 total_cost = len(results_df) * backtest_bets * 10
                 
                 with stat_col1:
@@ -557,16 +719,32 @@ if draws and len(draws) > 0:
                 with stat_col2:
                     st.metric("中奖期数", winning_draws_count)
                 with stat_col3:
-                    st.metric("平均匹配数", f"{avg_match_val:.2f}")
+                    st.metric("中奖率", f"{winning_draws_count/total_draws_count*100:.1f}%")
                 with stat_col4:
+                    st.metric("平均匹配数", f"{avg_match_val:.2f}")
+                with stat_col5:
                     roi_val = ((total_prize - total_cost) / total_cost) * 100 if total_cost > 0 else 0
                     st.metric("投资回报率(ROI)", f"{roi_val:+.1f}%")
                 
-                st.markdown(f"**总投入**: ${total_cost} | **总奖金**: ${total_prize} | **净收益**: ${total_prize - total_cost}")
+                st.markdown(f"""
+                **💰 资金统计**
+                - 总投入: **${total_cost}**
+                - 总奖金: **${total_prize}**
+                - 净收益: **${total_prize - total_cost}**
+                """)
                 
-                with st.expander("详细回测结果"):
-                    st.dataframe(results_df, use_container_width=True)
+                # 中奖等级分布
+                st.markdown("### 📊 中奖等级分布")
+                prize_dist = results_df[results_df['中奖等级'] != '无中奖']['中奖等级'].value_counts()
+                if len(prize_dist) > 0:
+                    fig_prize = px.bar(
+                        x=prize_dist.index, y=prize_dist.values,
+                        title='中奖等级分布',
+                        labels={'x': '中奖等级', 'y': '次数'}
+                    )
+                    st.plotly_chart(fig_prize, use_container_width=True)
                 
+                # 匹配数分布
                 match_dist = results_df['最佳匹配数'].value_counts().sort_index()
                 fig_match = px.bar(
                     x=match_dist.index, y=match_dist.values,
@@ -574,8 +752,15 @@ if draws and len(draws) > 0:
                     labels={'x': '匹配号码数', 'y': '期数'}
                 )
                 st.plotly_chart(fig_match, use_container_width=True)
+                
+                # 详细结果
+                with st.expander("📋 详细回测结果"):
+                    st.dataframe(results_df, use_container_width=True)
             else:
-                st.warning(f"需要至少100期数据才能进行回测，当前只有{len(draws)}期")
+                st.warning("回测数据不足，请减少训练期数")
+        else:
+            st.warning(f"需要至少 {train_periods + 10} 期数据才能进行回测，当前只有 {len(draws)} 期")
 
+# 页脚
 st.markdown("---")
-st.caption("注意: 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
+st.caption("⚠️ 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
