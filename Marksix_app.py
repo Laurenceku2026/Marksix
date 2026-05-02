@@ -17,7 +17,6 @@ if st.button("🔍 查奖", key="check_prize"):
             bets = st.session_state['generated_bets']
             num_count = st.session_state['num_count']
             
-            # 构建结果表格
             result_data = []
             for i, bet in enumerate(bets, 1):
                 numbers_sorted = sorted(bet['numbers'])
@@ -31,7 +30,6 @@ if st.button("🔍 查奖", key="check_prize"):
                     '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0"
                 }
                 
-                # 为每一期添加中奖个数列
                 for draw in check_draws:
                     match_count = calculate_match_count(
                         numbers_sorted, 
@@ -46,7 +44,6 @@ if st.button("🔍 查奖", key="check_prize"):
             result_df = pd.DataFrame(result_data)
             st.dataframe(result_df, use_container_width=True, hide_index=True)
             
-            # 统计信息
             st.markdown("**📊 查奖统计**")
             stats_data = []
             for draw in check_draws:
@@ -75,4 +72,4 @@ if st.button("🔍 查奖", key="check_prize"):
 
 # 页脚
 st.markdown("---")
-st.caption("⚠️ 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
+st.caption("注意: 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
