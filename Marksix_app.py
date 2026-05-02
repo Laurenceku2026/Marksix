@@ -8,6 +8,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import hashlib
 import hmac
+from supabase import create_client, Client
 
 # 页面配置
 st.set_page_config(
@@ -16,7 +17,66 @@ st.set_page_config(
     layout="wide"
 )
 
-# ==================== 核心函数（必须放在最前面） ====================
+# ==================== Supabase 初始化 ====================
+def init_supabase():
+    """初始化Supabase客户端"""
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"]
+        supabase_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+        return create_client(supabase_url, supabase_key)
+    except Exception as e:
+        st.error(f"Supabase连接失败: {e}")
+        return None
+
+def save_draws_to_supabase(draws):
+    """保存开奖数据到Supabase"""
+    supabase = init_supabase()
+    if supabase is None:
+        return False
+    
+    try:
+        # 先清空表
+        supabase.table("marksix_draws").delete().neq("id", 0).execute()
+        
+        # 批量插入数据
+        for draw in draws:
+            data = {
+                "period": draw.get('period'),
+                "date": draw.get('date'),
+                "numbers": draw['numbers'],
+                "special": draw.get('special'),
+                "sum_value": draw['sum']
+            }
+            supabase.table("marksix_draws").insert(data).execute()
+        
+        return True
+    except Exception as e:
+        st.error(f"保存到Supabase失败: {e}")
+        return False
+
+def load_draws_from_supabase():
+    """从Supabase加载开奖数据"""
+    supabase = init_supabase()
+    if supabase is None:
+        return None
+    
+    try:
+        response = supabase.table("marksix_draws").select("*").order("period", desc=False).execute()
+        draws = []
+        for row in response.data:
+            draws.append({
+                'period': row.get('period'),
+                'date': row.get('date'),
+                'numbers': row['numbers'],
+                'special': row.get('special'),
+                'sum': row['sum_value']
+            })
+        return draws
+    except Exception as e:
+        st.error(f"从Supabase加载数据失败: {e}")
+        return None
+
+# ==================== 核心函数 ====================
 
 def parse_pasted_data(text):
     """解析粘贴的数据文本"""
@@ -27,7 +87,6 @@ def parse_pasted_data(text):
         if not line.strip():
             continue
         
-        # 用制表符、逗号或空格分割
         parts = line.replace(',', '\t').replace(' ', '\t').split('\t')
         parts = [p.strip() for p in parts if p.strip()]
         
@@ -41,7 +100,7 @@ def parse_pasted_data(text):
                 
                 if len(nums) == 7:
                     draws.append({
-                        'period': parts[0],
+                        'period': int(parts[0]) if parts[0].isdigit() else parts[0],
                         'date': parts[1] if len(parts) > 1 else None,
                         'numbers': sorted(nums[:6]),
                         'special': nums[6],
@@ -77,7 +136,7 @@ def parse_excel_file(uploaded_file):
                     
                     if len(nums) == 6:
                         draws.append({
-                            'period': row.get('期次', idx+1),
+                            'period': int(row.get('期次', idx+1)) if str(row.get('期次', idx+1)).isdigit() else idx+1,
                             'date': row.get('開獎日期', None),
                             'numbers': sorted(nums),
                             'special': special,
@@ -268,12 +327,15 @@ def calculate_prize(match_count, special_match):
     else:
         return "无中奖", 0
 
-def backtest(draws, scores, num_bets_per_draw, strategy, analysis_periods, train_periods=100):
-    """回测策略"""
-    results = []
-    min_train = min(train_periods, len(draws) - 10)
+def backtest_strategy(draws, num_bets_per_draw, strategy, analysis_periods, test_periods):
+    """回测策略 - 只测试最后N期"""
+    if len(draws) < test_periods + analysis_periods:
+        return None, f"数据不足：需要至少 {test_periods + analysis_periods} 期数据"
     
-    for i in range(min_train, len(draws)):
+    results = []
+    test_start = len(draws) - test_periods
+    
+    for i in range(test_start, len(draws)):
         train_draws = draws[:i]
         test_draw = draws[i]
         
@@ -297,6 +359,7 @@ def backtest(draws, scores, num_bets_per_draw, strategy, analysis_periods, train
         
         results.append({
             '期次': test_draw.get('period', i+1),
+            '日期': test_draw.get('date', ''),
             '真实号码': str(test_draw['numbers']),
             '真实和值': test_draw['sum'],
             '最佳匹配数': best_match,
@@ -305,7 +368,7 @@ def backtest(draws, scores, num_bets_per_draw, strategy, analysis_periods, train
             '奖金': best_amount
         })
     
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), None
 
 # ==================== 管理员验证函数 ====================
 def check_password(password):
@@ -322,6 +385,7 @@ def admin_login():
         if submitted:
             if username == "Laurence_ku" and check_password(password):
                 st.session_state['admin_logged_in'] = True
+                st.session_state['show_admin'] = False
                 st.success("登录成功！")
                 st.rerun()
             else:
@@ -331,7 +395,223 @@ def admin_logout():
     """管理员登出"""
     if st.button("退出登录", key="logout_btn"):
         st.session_state['admin_logged_in'] = False
+        st.session_state['show_admin'] = False
         st.rerun()
+
+# ==================== 管理员页面 ====================
+def show_admin_page():
+    """显示管理员页面"""
+    with st.expander("🔧 管理员控制台", expanded=True):
+        st.subheader("📁 历史数据管理")
+        
+        # 显示当前数据状态
+        if st.session_state['draws']:
+            st.info(f"当前已加载 {len(st.session_state['draws'])} 期数据 (来源: {st.session_state['data_source']})")
+        else:
+            st.warning("暂无数据，请导入历史数据")
+        
+        # 数据导入方式
+        admin_input_method = st.radio(
+            "选择数据输入方式",
+            ["粘贴数据", "上传Excel文件", "从Supabase加载"],
+            horizontal=True,
+            key="admin_input"
+        )
+        
+        new_draws = None
+        
+        if admin_input_method == "粘贴数据":
+            st.markdown("""
+            **数据格式**: 每期一行，用制表符或逗号分隔
+            期次 日期 B1 B2 B3 B4 B5 B6 B7
+            示例: 26045 2026-04-25 4 16 21 36 42 46 9
+            """)
+            
+            admin_pasted = st.text_area(
+                "粘贴历史数据",
+                height=300,
+                key="admin_pasted",
+                help="支持制表符、逗号或空格分隔"
+            )
+            
+            if st.button("预览数据", key="preview_pasted"):
+                if admin_pasted:
+                    new_draws = parse_pasted_data(admin_pasted)
+                    if new_draws:
+                        st.success(f"成功解析 {len(new_draws)} 期数据")
+                        st.dataframe(pd.DataFrame(new_draws[-20:]), use_container_width=True)
+                    else:
+                        st.error("数据解析失败")
+        
+        elif admin_input_method == "上传Excel文件":
+            admin_file = st.file_uploader(
+                "上传Excel文件",
+                type=['xlsx', 'xls'],
+                key="admin_file"
+            )
+            
+            if admin_file:
+                new_draws = parse_excel_file(admin_file)
+                if new_draws:
+                    st.success(f"成功解析 {len(new_draws)} 期数据")
+                    st.dataframe(pd.DataFrame(new_draws[-20:]), use_container_width=True)
+        
+        else:  # 从Supabase加载
+            if st.button("从Supabase加载数据", key="load_from_supabase"):
+                with st.spinner("正在加载..."):
+                    new_draws = load_draws_from_supabase()
+                    if new_draws:
+                        st.success(f"成功从Supabase加载 {len(new_draws)} 期数据")
+                        st.dataframe(pd.DataFrame(new_draws[-20:]), use_container_width=True)
+                    else:
+                        st.error("加载失败")
+        
+        # 保存按钮
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col1:
+            if st.button("💾 保存数据到本地", type="primary", key="save_local"):
+                if new_draws:
+                    st.session_state['draws'] = new_draws
+                    st.session_state['data_source'] = admin_input_method
+                    st.success(f"成功保存 {len(new_draws)} 期数据到本地！")
+                    st.rerun()
+                else:
+                    st.error("请先导入数据")
+        
+        with col2:
+            if st.button("☁️ 保存数据到Supabase", key="save_supabase"):
+                if new_draws:
+                    with st.spinner("正在保存..."):
+                        if save_draws_to_supabase(new_draws):
+                            st.success(f"成功保存 {len(new_draws)} 期数据到Supabase！")
+                            st.balloons()
+                        else:
+                            st.error("保存失败")
+                else:
+                    st.error("请先导入数据")
+        
+        with col3:
+            if st.button("❌ 关闭", key="close_admin"):
+                st.session_state['show_admin'] = False
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # ==================== 策略回测（放在管理员页面） ====================
+        st.subheader("📊 策略回测")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            backtest_bets = st.number_input(
+                "回测注数",
+                min_value=1,
+                max_value=10,
+                value=4,
+                step=1,
+                key="backtest_bets"
+            )
+        
+        with col2:
+            backtest_strategy = st.selectbox(
+                "回测策略",
+                ["和值大中小", "和值趋势预测", "混合策略"],
+                key="backtest_strategy"
+            )
+        
+        with col3:
+            backtest_analysis_periods = st.number_input(
+                "分析期数",
+                min_value=10,
+                max_value=500,
+                value=100,
+                step=10,
+                key="backtest_periods"
+            )
+        
+        with col4:
+            test_periods = st.number_input(
+                "测试期数",
+                min_value=5,
+                max_value=100,
+                value=20,
+                step=5,
+                help="测试最后N期的表现"
+            )
+        
+        run_backtest = st.button("▶️ 运行回测", type="secondary", key="run_backtest")
+        
+        if run_backtest:
+            if st.session_state['draws'] is None:
+                st.warning("请先导入历史数据")
+            else:
+                with st.spinner("正在运行回测..."):
+                    draws = st.session_state['draws']
+                    results_df, error = backtest_strategy(
+                        draws, backtest_bets, backtest_strategy,
+                        backtest_analysis_periods, test_periods
+                    )
+                    
+                    if error:
+                        st.warning(error)
+                    elif results_df is not None and len(results_df) > 0:
+                        st.markdown("### 📈 回测结果统计")
+                        
+                        stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
+                        
+                        total_draws_count = len(results_df)
+                        winning_draws_count = results_df[results_df['中奖等级'] != '无中奖'].shape[0]
+                        avg_match_val = results_df['最佳匹配数'].mean()
+                        
+                        total_prize = results_df['奖金'].sum()
+                        total_cost = len(results_df) * backtest_bets * 10
+                        
+                        with stat_col1:
+                            st.metric("测试期数", total_draws_count)
+                        with stat_col2:
+                            st.metric("中奖期数", winning_draws_count)
+                        with stat_col3:
+                            st.metric("中奖率", f"{winning_draws_count/total_draws_count*100:.1f}%")
+                        with stat_col4:
+                            st.metric("平均匹配数", f"{avg_match_val:.2f}")
+                        with stat_col5:
+                            roi_val = ((total_prize - total_cost) / total_cost) * 100 if total_cost > 0 else 0
+                            st.metric("投资回报率(ROI)", f"{roi_val:+.1f}%")
+                        
+                        st.markdown(f"""
+                        **💰 资金统计**
+                        - 总投入: **${total_cost}**
+                        - 总奖金: **${total_prize}**
+                        - 净收益: **${total_prize - total_cost}**
+                        """)
+                        
+                        # 中奖等级分布
+                        st.markdown("### 📊 中奖等级分布")
+                        prize_dist = results_df[results_df['中奖等级'] != '无中奖']['中奖等级'].value_counts()
+                        if len(prize_dist) > 0:
+                            fig_prize = px.bar(
+                                x=prize_dist.index, y=prize_dist.values,
+                                title='中奖等级分布',
+                                labels={'x': '中奖等级', 'y': '次数'}
+                            )
+                            st.plotly_chart(fig_prize, use_container_width=True)
+                        else:
+                            st.info("本次回测未中奖")
+                        
+                        # 匹配数分布
+                        match_dist = results_df['最佳匹配数'].value_counts().sort_index()
+                        fig_match = px.bar(
+                            x=match_dist.index, y=match_dist.values,
+                            title='每期最佳匹配数分布',
+                            labels={'x': '匹配号码数', 'y': '期数'}
+                        )
+                        st.plotly_chart(fig_match, use_container_width=True)
+                        
+                        # 详细结果
+                        with st.expander("📋 详细回测结果"):
+                            st.dataframe(results_df, use_container_width=True)
+                    else:
+                        st.warning("回测数据不足")
 
 # ==================== 初始化session state ====================
 if 'admin_logged_in' not in st.session_state:
@@ -347,75 +627,18 @@ if 'show_admin' not in st.session_state:
 col_title, col_settings = st.columns([0.95, 0.05])
 with col_settings:
     if st.button("⚙️", key="settings_icon", help="管理员设置"):
-        st.session_state['show_admin'] = not st.session_state.get('show_admin', False)
-
-# 管理员弹窗
-if st.session_state.get('show_admin', False):
-    with st.expander("🔐 管理员入口", expanded=True):
         if not st.session_state['admin_logged_in']:
-            admin_login()
+            st.session_state['show_admin'] = not st.session_state.get('show_admin', False)
         else:
-            st.success("✅ 已登录管理员模式")
-            admin_logout()
-            
-            st.markdown("---")
-            st.subheader("📁 历史数据管理")
-            
-            admin_input_method = st.radio(
-                "选择数据输入方式",
-                ["粘贴数据", "上传Excel文件"],
-                horizontal=True,
-                key="admin_input"
-            )
-            
-            if admin_input_method == "粘贴数据":
-                st.markdown("""
-                **数据格式**: 每期一行，用制表符或逗号分隔
-                期次 日期 B1 B2 B3 B4 B5 B6 B7
-                示例: 26045 2026-04-25 4 16 21 36 42 46 9
-                """)
-                
-                admin_pasted = st.text_area(
-                    "粘贴历史数据",
-                    height=400,
-                    key="admin_pasted",
-                    help="支持制表符、逗号或空格分隔"
-                )
-                
-                if st.button("保存数据", type="primary", key="save_pasted"):
-                    if admin_pasted:
-                        draws = parse_pasted_data(admin_pasted)
-                        if draws:
-                            st.session_state['draws'] = draws
-                            st.session_state['data_source'] = 'pasted'
-                            st.success(f"成功保存 {len(draws)} 期数据")
-                            st.rerun()
-                        else:
-                            st.error("数据解析失败")
-                
-            else:
-                admin_file = st.file_uploader(
-                    "上传Excel文件",
-                    type=['xlsx', 'xls'],
-                    key="admin_file"
-                )
-                
-                if admin_file:
-                    draws = parse_excel_file(admin_file)
-                    if draws:
-                        if st.button("保存数据", key="save_excel"):
-                            st.session_state['draws'] = draws
-                            st.session_state['data_source'] = 'excel'
-                            st.success(f"成功保存 {len(draws)} 期数据")
-                            st.rerun()
-            
-            if st.session_state['draws']:
-                st.info(f"当前已加载 {len(st.session_state['draws'])} 期数据 (来源: {st.session_state['data_source']})")
-                
-                if st.button("清除数据", key="clear_data"):
-                    st.session_state['draws'] = None
-                    st.session_state['data_source'] = None
-                    st.rerun()
+            st.session_state['show_admin'] = not st.session_state.get('show_admin', False)
+
+# 显示管理员页面
+if st.session_state.get('show_admin', False):
+    if not st.session_state['admin_logged_in']:
+        admin_login()
+    else:
+        show_admin_page()
+        admin_logout()
 
 # ==================== 理论介绍（左侧边栏） ====================
 with st.sidebar:
@@ -475,7 +698,7 @@ st.title("🎯 六合彩AI智能选号工具")
 
 # 检查是否有数据
 if st.session_state['draws'] is None:
-    st.warning("⚠️ 请先点击右上角齿轮图标，进入管理员页面导入历史数据")
+    st.info("👈 请点击右上角齿轮图标，进入管理员页面导入历史数据")
     st.stop()
 
 draws = st.session_state['draws']
@@ -494,10 +717,6 @@ with col1:
         step=10,
         help="使用最近N期数据计算冷热码"
     )
-
-with col2:
-    st.write("")
-    st.write("")
 
 scores, freq, short_freq, absence = calculate_scores(draws, window_total=analysis_periods)
 
@@ -630,114 +849,6 @@ if st.button("🚀 生成智能投注", type="primary"):
     - 共生成 {num_bets} 注推荐号码
     - 每注均经过热码优先 + 和值约束 + 连号/跳号筛选
     """)
-
-# ==================== 策略回测 ====================
-st.subheader("📊 策略回测")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    backtest_bets = st.number_input(
-        "回测注数",
-        min_value=1,
-        max_value=10,
-        value=4,
-        step=1,
-        key="backtest_bets"
-    )
-
-with col2:
-    backtest_strategy = st.selectbox(
-        "回测策略",
-        ["和值大中小", "和值趋势预测", "混合策略"],
-        key="backtest_strategy"
-    )
-
-with col3:
-    backtest_analysis_periods = st.number_input(
-        "分析期数",
-        min_value=10,
-        max_value=min(500, len(draws)),
-        value=min(100, len(draws)),
-        step=10,
-        key="backtest_periods"
-    )
-
-with col4:
-    train_periods = st.number_input(
-        "训练期数",
-        min_value=20,
-        max_value=min(300, len(draws) - 10),
-        value=min(100, len(draws) - 10),
-        step=10,
-        help="用前N期训练，之后期数回测"
-    )
-
-run_backtest = st.button("▶️ 运行回测", type="secondary")
-
-if run_backtest:
-    with st.spinner("正在运行回测..."):
-        if len(draws) > train_periods + 10:
-            results_df = backtest(
-                draws, scores, backtest_bets, backtest_strategy, 
-                backtest_analysis_periods, train_periods
-            )
-            
-            if len(results_df) > 0:
-                st.markdown("### 📈 回测结果统计")
-                
-                stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
-                
-                total_draws_count = len(results_df)
-                winning_draws_count = results_df[results_df['中奖等级'] != '无中奖'].shape[0]
-                avg_match_val = results_df['最佳匹配数'].mean()
-                
-                total_prize = results_df['奖金'].sum()
-                total_cost = len(results_df) * backtest_bets * 10
-                
-                with stat_col1:
-                    st.metric("测试期数", total_draws_count)
-                with stat_col2:
-                    st.metric("中奖期数", winning_draws_count)
-                with stat_col3:
-                    st.metric("中奖率", f"{winning_draws_count/total_draws_count*100:.1f}%")
-                with stat_col4:
-                    st.metric("平均匹配数", f"{avg_match_val:.2f}")
-                with stat_col5:
-                    roi_val = ((total_prize - total_cost) / total_cost) * 100 if total_cost > 0 else 0
-                    st.metric("投资回报率(ROI)", f"{roi_val:+.1f}%")
-                
-                st.markdown(f"""
-                **💰 资金统计**
-                - 总投入: **${total_cost}**
-                - 总奖金: **${total_prize}**
-                - 净收益: **${total_prize - total_cost}**
-                """)
-                
-                st.markdown("### 📊 中奖等级分布")
-                prize_dist = results_df[results_df['中奖等级'] != '无中奖']['中奖等级'].value_counts()
-                if len(prize_dist) > 0:
-                    fig_prize = px.bar(
-                        x=prize_dist.index, y=prize_dist.values,
-                        title='中奖等级分布',
-                        labels={'x': '中奖等级', 'y': '次数'}
-                    )
-                    st.plotly_chart(fig_prize, use_container_width=True)
-                
-                match_dist = results_df['最佳匹配数'].value_counts().sort_index()
-                fig_match = px.bar(
-                    x=match_dist.index, y=match_dist.values,
-                    title='每期最佳匹配数分布',
-                    labels={'x': '匹配号码数', 'y': '期数'}
-                )
-                st.plotly_chart(fig_match, use_container_width=True)
-                
-                with st.expander("📋 详细回测结果"):
-                    st.dataframe(results_df, use_container_width=True)
-            else:
-                st.warning("回测数据不足")
-        else:
-            st.warning(f"需要至少 {train_periods + 10} 期数据才能进行回测，当前只有 {len(draws)} 期")
 
 # 页脚
 st.markdown("---")
