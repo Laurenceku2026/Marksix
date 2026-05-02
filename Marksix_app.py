@@ -2,7 +2,7 @@
 
 check_text = st.text_area("粘贴兑奖数据", height=200, key="check_text_area")
 
-if st.button("🔍 查奖", key="check_prize_btn"):
+if st.button("查奖", key="check_prize_btn"):
     if check_text.strip():
         check_draws = parse_check_draws(check_text)
         if check_draws:
@@ -19,7 +19,7 @@ if st.button("🔍 查奖", key="check_prize_btn"):
                 result_data.append(row)
             st.dataframe(pd.DataFrame(result_data), use_container_width=True, hide_index=True)
             
-            st.markdown("**📊 查奖统计**")
+            st.markdown("**查奖统计**")
             stats_data = []
             for draw in check_draws:
                 matches = [float(row[f"{draw['period']}期"]) for row in result_data if f"{draw['period']}期" in row]
@@ -43,4 +43,4 @@ if st.button("🔍 查奖", key="check_prize_btn"):
 
 
 st.markdown("---")
-st.caption("⚠️ 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
+st.caption("注意: 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
