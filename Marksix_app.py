@@ -328,8 +328,12 @@ def calculate_prize(match_count, special_match):
     else:
         return "无中奖", 0
 
-def backtest_strategy(draws, num_bets_per_draw, strategy, analysis_periods, test_periods):
-    """回测策略 - 只测试最后N期"""
+def backtest_strategy(draws, num_bets_per_draw, strategy, analysis_periods, test_periods, seed=None):
+    """回测策略 - 只测试最后N期，支持指定随机种子"""
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+    
     if len(draws) < test_periods + analysis_periods:
         return None, f"数据不足：需要至少 {test_periods + analysis_periods} 期数据"
     
