@@ -686,7 +686,7 @@ if st.session_state.get("generated_bets") is not None:
 
 check_text = st.text_area("粘贴兑奖数据", height=200)
 
-    if st.button("查奖"):
+if st.button("查奖"):
     if check_text.strip():
     check_draws = parse_check_draws(check_text)
     if check_draws:
