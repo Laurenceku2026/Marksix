@@ -17,6 +17,34 @@ st.set_page_config(
     layout="wide"
 )
 
+# 自定义CSS让所有表格居中
+st.markdown("""
+<style>
+    /* 让dataframe所有列居中 */
+    .stDataFrame {
+        text-align: center;
+    }
+    .stDataFrame table {
+        text-align: center;
+        width: 100%;
+    }
+    .stDataFrame th {
+        text-align: center !important;
+    }
+    .stDataFrame td {
+        text-align: center !important;
+    }
+    /* 让data_metric也居中 */
+    .stMetric {
+        text-align: center;
+    }
+    /* 数字输入框居中 */
+    .stNumberInput input {
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # ==================== Supabase 初始化 ====================
 def init_supabase():
     """初始化Supabase客户端"""
@@ -454,6 +482,7 @@ def backtest_strategy(draws, num_bets_per_draw, strategy, num_count, require_pat
         
         train_scores, _, _, _ = calculate_scores(train_draws, window_total=analysis_periods)
         
+        # 使用传入的seed_input而不是None
         bets = generate_bets_by_strategy(
             train_draws, train_scores, num_bets_per_draw, strategy,
             num_count, require_pattern, trend_window, seed_input
@@ -519,14 +548,16 @@ def display_backtest_results(results_df, backtest_bets):
     """)
     
     match_dist = results_df['最佳匹配数'].value_counts().sort_index()
-    fig_match = px.bar(
-        x=match_dist.index, y=match_dist.values,
-        title='每期最佳匹配数分布',
-        labels={'x': '匹配号码数', 'y': '期数'}
-    )
-    st.plotly_chart(fig_match, use_container_width=True)
+    if len(match_dist) > 0:
+        fig_match = px.bar(
+            x=match_dist.index, y=match_dist.values,
+            title='每期最佳匹配数分布',
+            labels={'x': '匹配号码数', 'y': '期数'}
+        )
+        st.plotly_chart(fig_match, use_container_width=True)
     
     with st.expander("📋 详细回测结果"):
+        # 居中显示回测结果表格
         st.dataframe(results_df, use_container_width=True)
 
 # ==================== 管理员验证函数 ====================
@@ -553,6 +584,16 @@ def admin_logout():
         st.session_state['admin_logged_in'] = False
         st.session_state['show_admin'] = False
         st.rerun()
+
+# ==================== 居中表格显示函数 ====================
+def display_centered_dataframe(df, key=None):
+    """显示居中的dataframe"""
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        key=key
+    )
 
 # ==================== 管理员页面 ====================
 def show_admin_page():
@@ -597,7 +638,7 @@ def show_admin_page():
                     if parsed_draws:
                         st.session_state['preview_draws'] = parsed_draws
                         st.success(f"成功解析 {len(parsed_draws)} 期数据")
-                        st.dataframe(pd.DataFrame(parsed_draws[-20:]), use_container_width=True)
+                        display_centered_dataframe(pd.DataFrame(parsed_draws[-20:]))
                     else:
                         st.error("数据解析失败")
                 
@@ -617,7 +658,7 @@ def show_admin_page():
                     if parsed_draws:
                         st.session_state['preview_draws'] = parsed_draws
                         st.success(f"成功解析 {len(parsed_draws)} 期数据")
-                        st.dataframe(pd.DataFrame(parsed_draws[-20:]), use_container_width=True)
+                        display_centered_dataframe(pd.DataFrame(parsed_draws[-20:]))
                     else:
                         st.error("数据解析失败")
                 
@@ -668,7 +709,7 @@ def show_admin_page():
                 )
             
             with col2:
-                backtest_strategy = st.selectbox(
+                backtest_strategy_selected = st.selectbox(
                     "回测策略",
                     ["和值大中小", "和值趋势预测", "混合策略"],
                     key="backtest_strategy"
@@ -704,10 +745,11 @@ def show_admin_page():
                 backtest_periods = st.number_input(
                     "测试期数",
                     min_value=5,
-                    max_value=100,
-                    value=20,
+                    max_value=min(100, len(draws)-50),
+                    value=min(20, len(draws)-50),
                     step=5,
-                    key="backtest_periods"
+                    key="backtest_periods",
+                    help=f"最多可测试 {len(draws)-50} 期"
                 )
             
             compare_seeds = st.button("🔬 对比多个Random Seed", type="secondary", key="compare_seeds")
@@ -716,7 +758,7 @@ def show_admin_page():
             if run_backtest:
                 with st.spinner("正在运行回测..."):
                     results_df, error = backtest_strategy(
-                        draws, backtest_bets, backtest_strategy, backtest_num_count,
+                        draws, backtest_bets, backtest_strategy_selected, backtest_num_count,
                         backtest_pattern == "是", backtest_trend_window,
                         100, backtest_periods, 42
                     )
@@ -739,7 +781,7 @@ def show_admin_page():
                     
                     try:
                         results_df, error = backtest_strategy(
-                            draws, backtest_bets, backtest_strategy, backtest_num_count,
+                            draws, backtest_bets, backtest_strategy_selected, backtest_num_count,
                             backtest_pattern == "是", backtest_trend_window,
                             100, backtest_periods, seed
                         )
@@ -926,7 +968,7 @@ with col1:
         {'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]}
         for num in sorted(scores, key=scores.get, reverse=True)[:10]
     ])
-    st.dataframe(hot_df, use_container_width=True)
+    display_centered_dataframe(hot_df)
 
 with col2:
     st.markdown("**❄️ 冷门号码 (Bottom 10)**")
@@ -934,7 +976,7 @@ with col2:
         {'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]}
         for num in sorted(scores, key=scores.get)[:10]
     ])
-    st.dataframe(cold_df, use_container_width=True)
+    display_centered_dataframe(cold_df)
 
 with col3:
     st.markdown("**📈 近期活跃**")
@@ -1124,18 +1166,7 @@ if st.session_state['generated_bets'] is not None:
     base_bets_df = pd.DataFrame(bets_data)
     
     # 显示基础表格（不带中奖列）
-    st.dataframe(
-        base_bets_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "注数": st.column_config.NumberColumn("注数", format="%d"),
-            "推荐号码": st.column_config.TextColumn("推荐号码"),
-            "和值": st.column_config.NumberColumn("和值", format="%d"),
-            "目标策略": st.column_config.TextColumn("目标策略"),
-            "偏差": st.column_config.TextColumn("偏差")
-        }
-    )
+    display_centered_dataframe(base_bets_df)
     
     st.info(f"""
     📊 **预测信息**
@@ -1223,23 +1254,7 @@ if st.session_state['generated_bets'] is not None:
             enhanced_df = enhanced_df.rename(columns=rename_dict)
             
             # 显示带中奖列的表格
-            column_config = {
-                "注数": st.column_config.NumberColumn("注数", format="%d"),
-                "推荐号码": st.column_config.TextColumn("推荐号码"),
-                "和值": st.column_config.NumberColumn("和值", format="%d"),
-                "目标策略": st.column_config.TextColumn("目标策略"),
-                "偏差": st.column_config.TextColumn("偏差")
-            }
-            for col in enhanced_df.columns:
-                if col not in ['注数', '推荐号码', '和值', '目标策略', '偏差']:
-                    column_config[col] = st.column_config.TextColumn(col)
-            
-            st.dataframe(
-                enhanced_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config=column_config
-            )
+            display_centered_dataframe(enhanced_df)
             
             # 显示解析的数据预览（如果超过3期用滚动条）
             if len(check_draws) > 3:
@@ -1248,13 +1263,13 @@ if st.session_state['generated_bets'] is not None:
                         {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
                         for d in check_draws
                     ])
-                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                    display_centered_dataframe(preview_df)
             else:
                 preview_df = pd.DataFrame([
                     {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
                     for d in check_draws
                 ])
-                st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                display_centered_dataframe(preview_df)
                 
         else:
             st.error("❌ 解析失败，请检查格式")
