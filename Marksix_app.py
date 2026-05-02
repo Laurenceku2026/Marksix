@@ -1,75 +1,626 @@
-""")
+import streamlit as st
+import pandas as pd
+import numpy as np
+import random
+from datetime import datetime
+import plotly.express as px
+import plotly.graph_objects as go
+import hmac
+from supabase import create_client
 
-check_text = st.text_area(
-    "粘贴兑奖数据",
-    height=200,
-    key="check_text",
-    help="每期一行，格式：期次 日期 B1 B2 B3 B4 B5 B6 B7"
+st.set_page_config(
+    page_title="六合彩AI分析工具 - DFSS智能选号",
+    page_icon="🎰",
+    layout="wide"
 )
 
-if st.button("🔍 查奖", key="check_prize"):
-    if check_text.strip():
-        check_draws = parse_check_draws(check_text)
-        
-        if check_draws:
-            st.success(f"成功解析 {len(check_draws)} 期数据")
-            
-            bets = st.session_state['generated_bets']
-            num_count = st.session_state['num_count']
-            
-            result_data = []
-            for i, bet in enumerate(bets, 1):
-                numbers_sorted = sorted(bet['numbers'])
-                numbers_display = ' '.join(str(n) for n in numbers_sorted)
-                
-                row = {
-                    '注数': i,
-                    '推荐号码': numbers_display,
-                    '和值': bet['sum'],
-                    '目标策略': bet['target'],
-                    '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0"
-                }
-                
-                for draw in check_draws:
-                    match_count = calculate_match_count(
-                        numbers_sorted, 
-                        draw['numbers'], 
-                        draw['special']
-                    )
-                    col_name = f"{draw['period']}期"
-                    row[col_name] = f"{match_count:.1f}"
-                
-                result_data.append(row)
-            
-            result_df = pd.DataFrame(result_data)
-            st.dataframe(result_df, use_container_width=True, hide_index=True)
-            
-            st.markdown("**📊 查奖统计**")
-            stats_data = []
-            for draw in check_draws:
-                col_name = f"{draw['period']}期"
-                matches = [float(row[col_name]) for row in result_data]
-                avg_match = np.mean(matches)
-                max_match = max(matches)
-                match_3plus = len([m for m in matches if m >= 3])
-                match_3half_plus = len([m for m in matches if m >= 3.5])
-                
-                stats_data.append({
-                    '期次': draw['period'],
-                    '日期': draw['date'],
-                    '平均中奖个数': f"{avg_match:.2f}",
-                    '最高中奖个数': f"{max_match:.1f}",
-                    '中3个以上注数': match_3plus,
-                    '中3.5个以上注数': match_3half_plus
-                })
-            
-            stats_df = pd.DataFrame(stats_data)
-            st.dataframe(stats_df, use_container_width=True, hide_index=True)
-        else:
-            st.error("数据解析失败，请检查格式")
-    else:
-        st.warning("请粘贴兑奖数据")
 
-# 页脚
+def init_supabase():
+    try:
+        supabase_url = st.secrets["SUPABASE_URL"]
+        supabase_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+        return create_client(supabase_url, supabase_key)
+    except Exception as e:
+        st.error(f"Supabase连接失败: {e}")
+        return None
+
+
+def save_draws_to_supabase(draws):
+    supabase = init_supabase()
+    if supabase is None:
+        return False
+    try:
+        table = supabase.schema('marksix_schema').table('marksix_draws')
+        table.delete().neq("id", 0).execute()
+        for draw in draws:
+            data = {
+                "period": draw.get('period'),
+                "date": draw.get('date'),
+                "numbers": draw['numbers'],
+                "special": draw.get('special'),
+                "sum_value": draw['sum']
+            }
+            table.insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"保存到Supabase失败: {e}")
+        return False
+
+
+def load_draws_from_supabase():
+    supabase = init_supabase()
+    if supabase is None:
+        return None
+    try:
+        response = supabase.schema('marksix_schema').table('marksix_draws').select("*").order("period", desc=False).execute()
+        draws = []
+        for row in response.data:
+            draws.append({
+                'period': row.get('period'),
+                'date': row.get('date'),
+                'numbers': row['numbers'],
+                'special': row.get('special'),
+                'sum': row['sum_value']
+            })
+        return draws
+    except Exception as e:
+        st.error(f"从Supabase加载数据失败: {e}")
+        return None
+
+
+def parse_pasted_data(text):
+    lines = text.strip().split('\n')
+    draws = []
+    for line in lines:
+        if not line.strip():
+            continue
+        parts = line.replace(',', '\t').replace(' ', '\t').split('\t')
+        parts = [p.strip() for p in parts if p.strip()]
+        if len(parts) >= 9:
+            try:
+                nums = []
+                for i in range(2, 9):
+                    if i < len(parts):
+                        num = int(float(parts[i]))
+                        nums.append(num)
+                if len(nums) == 7:
+                    draws.append({
+                        'period': int(parts[0]) if parts[0].isdigit() else parts[0],
+                        'date': parts[1] if len(parts) > 1 else None,
+                        'numbers': sorted(nums[:6]),
+                        'special': nums[6],
+                        'sum': sum(nums[:6])
+                    })
+            except (ValueError, IndexError):
+                continue
+    return draws
+
+
+def parse_excel_file(uploaded_file):
+    try:
+        df = pd.read_excel(uploaded_file, sheet_name=0)
+        number_cols = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
+        existing_cols = [col for col in number_cols if col in df.columns]
+        if len(existing_cols) >= 7:
+            draws = []
+            for idx, row in df.iterrows():
+                try:
+                    nums = []
+                    for col in existing_cols[:6]:
+                        val = row[col]
+                        if pd.notna(val):
+                            nums.append(int(val))
+                    special = None
+                    if len(existing_cols) > 6:
+                        special_val = row[existing_cols[6]]
+                        if pd.notna(special_val):
+                            special = int(special_val)
+                    if len(nums) == 6:
+                        draws.append({
+                            'period': int(row.get('期次', idx+1)) if str(row.get('期次', idx+1)).isdigit() else idx+1,
+                            'date': row.get('開獎日期', None),
+                            'numbers': sorted(nums),
+                            'special': special,
+                            'sum': sum(nums)
+                        })
+                except (ValueError, TypeError):
+                    continue
+            return draws
+    except Exception as e:
+        st.error(f"Excel解析错误: {e}")
+        return None
+
+
+def get_target_sum_by_numbers_count(num_count):
+    return 25 * num_count
+
+
+def convert_6sum_to_7sum(sum_6):
+    return int(sum_6 * 7 / 6)
+
+
+def calculate_scores(draws, window_total=100, window_short=20, window_recent=10):
+    if len(draws) < window_total:
+        window_total = len(draws)
+    total_draws = len(draws)
+    expected_freq = total_draws * 6 / 49
+    freq = {i: 0 for i in range(1, 50)}
+    for draw in draws[-window_total:]:
+        for num in draw['numbers']:
+            freq[num] += 1
+    short_freq = {i: 0 for i in range(1, 50)}
+    for draw in draws[-window_short:]:
+        for num in draw['numbers']:
+            short_freq[num] += 1
+    expected_short = window_short * 6 / 49
+    last_seen = {i: None for i in range(1, 50)}
+    for idx, draw in enumerate(reversed(draws)):
+        for num in draw['numbers']:
+            if last_seen[num] is None:
+                last_seen[num] = idx
+    absence = {i: last_seen[i] if last_seen[i] is not None else total_draws for i in range(1, 50)}
+    recent_numbers = set()
+    for draw in draws[-window_recent:]:
+        recent_numbers.update(draw['numbers'])
+    freq_mean = expected_freq
+    freq_std = np.std(list(freq.values())) if len(freq.values()) > 1 else 1
+    absence_mean = np.mean(list(absence.values()))
+    absence_std = np.std(list(absence.values())) if len(absence.values()) > 1 else 1
+    short_mean = expected_short
+    short_std = np.std(list(short_freq.values())) if len(short_freq.values()) > 1 else 1
+    scores = {}
+    for i in range(1, 50):
+        z_freq = (freq[i] - freq_mean) / freq_std if freq_std > 0 else 0
+        z_absence = (absence[i] - absence_mean) / absence_std if absence_std > 0 else 0
+        z_short = (short_freq[i] - short_mean) / short_std if short_std > 0 else 0
+        recent_active = 1 if i in recent_numbers else -1
+        score = 0.3 * z_freq + 0.3 * z_absence + 0.2 * z_short + 0.2 * recent_active
+        scores[i] = score
+    sorted_numbers = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+    hot_numbers = sorted_numbers[:15]
+    cold_numbers = sorted_numbers[-10:]
+    return scores, freq, short_freq, absence, hot_numbers, cold_numbers
+
+
+def has_consecutive_or_jump(nums):
+    nums = sorted(nums)
+    for i in range(len(nums)-1):
+        diff = nums[i+1] - nums[i]
+        if diff == 1 or diff == 2:
+            return True
+    return False
+
+
+def generate_combination(scores, hot_numbers, cold_numbers, num_count, target_sum=None, tolerance=15, require_pattern=True, allow_cold=False):
+    min_sum = target_sum - tolerance if target_sum is not None else 0
+    max_sum = target_sum + tolerance if target_sum is not None else 500
+    max_attempts = 50000
+    for _ in range(max_attempts):
+        selected = set()
+        if allow_cold:
+            num_hot = random.randint(1, min(3, num_count))
+            hot_pool = [n for n in hot_numbers if n not in selected]
+            if len(hot_pool) >= num_hot:
+                selected.update(random.sample(hot_pool, num_hot))
+            remaining = [n for n in range(1, 50) if n not in selected]
+            if len(remaining) < num_count - len(selected):
+                continue
+            selected.update(random.sample(remaining, num_count - len(selected)))
+        else:
+            num_hot = random.randint(2, min(3, num_count))
+            hot_pool = [n for n in hot_numbers if n not in selected]
+            if len(hot_pool) >= num_hot:
+                selected.update(random.sample(hot_pool, num_hot))
+            remaining = [n for n in range(1, 50) if n not in selected and n not in cold_numbers[:5]]
+            if len(remaining) < num_count - len(selected):
+                continue
+            selected.update(random.sample(remaining, num_count - len(selected)))
+        nums = sorted(selected)
+        total = sum(nums)
+        if target_sum is not None:
+            if not (min_sum <= total <= max_sum):
+                continue
+        if require_pattern:
+            if has_consecutive_or_jump(nums):
+                return nums, total
+        else:
+            return nums, total
+    for _ in range(10000):
+        nums = sorted(random.sample(range(1, 50), num_count))
+        total = sum(nums)
+        if target_sum is not None:
+            if min_sum <= total <= max_sum:
+                return nums, total
+        else:
+            return nums, total
+    return sorted(random.sample(range(1, 50), num_count)), sum(sorted(random.sample(range(1, 50), num_count)))
+
+
+def predict_trend_7code(draws, window=5):
+    if len(draws) < window:
+        return "中"
+    recent_sums_6 = [draw['sum'] for draw in draws[-window:]]
+    recent_sums_7 = [convert_6sum_to_7sum(s) for s in recent_sums_6]
+    avg_sum = np.mean(recent_sums_7)
+    if avg_sum > 185:
+        return "小"
+    elif avg_sum < 165:
+        return "大"
+    else:
+        return "中"
+
+
+def get_trend_target_sum(trend, num_count):
+    base_sum = get_target_sum_by_numbers_count(num_count)
+    if trend == "小":
+        return base_sum - 15
+    elif trend == "大":
+        return base_sum + 15
+    else:
+        return base_sum
+
+
+def set_random_seed(seed_input):
+    if seed_input is not None:
+        try:
+            random.seed(seed_input)
+            np.random.seed(seed_input)
+        except (ValueError, TypeError):
+            random.seed(42)
+            np.random.seed(42)
+    else:
+        random.seed()
+        np.random.seed()
+
+
+def generate_bets_by_strategy(draws, scores, hot_numbers, cold_numbers, num_bets, strategy, num_count, require_pattern, trend_window, seed_input):
+    set_random_seed(seed_input)
+    bets = []
+    base_target = get_target_sum_by_numbers_count(num_count)
+    cold_explore_count = max(1, int(num_bets * 0.1)) if num_bets >= 10 else (1 if num_bets >= 5 else 0)
+    cold_indices = set(random.sample(range(num_bets), cold_explore_count)) if cold_explore_count > 0 else set()
+    if strategy == "和值大中小":
+        for i in range(num_bets):
+            allow_cold = i in cold_indices
+            if i % 3 == 0:
+                target = base_target - 15
+                target_name = f"小和值({base_target-15})"
+            elif i % 3 == 1:
+                target = base_target
+                target_name = f"中和值({base_target})"
+            else:
+                target = base_target + 15
+                target_name = f"大和值({base_target+15})"
+            nums, total = generate_combination(scores, hot_numbers, cold_numbers, num_count, target, 15, require_pattern, allow_cold)
+            bets.append({'numbers': nums, 'sum': total, 'target': target_name, 'deviation': total - base_target})
+    elif strategy == "和值趋势预测":
+        trend = predict_trend_7code(draws, window=trend_window)
+        trend_target = get_trend_target_sum(trend, num_count)
+        for i in range(num_bets):
+            allow_cold = i in cold_indices
+            offset = random.randint(-5, 5)
+            target = trend_target + offset
+            target = max(25 * num_count - 30, min(25 * num_count + 30, target))
+            nums, total = generate_combination(scores, hot_numbers, cold_numbers, num_count, target, 15, require_pattern, allow_cold)
+            bets.append({'numbers': nums, 'sum': total, 'target': f'{trend}和值趋势(目标{target})', 'deviation': total - base_target})
+    else:
+        if num_bets > 4:
+            num_midlowhigh = max(1, num_bets // 3)
+            num_trend = num_bets - num_midlowhigh
+        else:
+            num_midlowhigh = num_bets // 2
+            num_trend = num_bets - num_midlowhigh
+        for i in range(num_midlowhigh):
+            allow_cold = i in cold_indices
+            if i % 3 == 0:
+                target = base_target - 15
+                target_name = f"小和值({base_target-15})"
+            elif i % 3 == 1:
+                target = base_target
+                target_name = f"中和值({base_target})"
+            else:
+                target = base_target + 15
+                target_name = f"大和值({base_target+15})"
+            nums, total = generate_combination(scores, hot_numbers, cold_numbers, num_count, target, 15, require_pattern, allow_cold)
+            bets.append({'numbers': nums, 'sum': total, 'target': target_name, 'deviation': total - base_target})
+        trend = predict_trend_7code(draws, window=trend_window)
+        trend_target = get_trend_target_sum(trend, num_count)
+        for i in range(num_trend):
+            allow_cold = (num_midlowhigh + i) in cold_indices
+            offset = random.randint(-5, 5)
+            target = trend_target + offset
+            target = max(25 * num_count - 30, min(25 * num_count + 30, target))
+            nums, total = generate_combination(scores, hot_numbers, cold_numbers, num_count, target, 15, require_pattern, allow_cold)
+            bets.append({'numbers': nums, 'sum': total, 'target': f'{trend}和值趋势(目标{target})', 'deviation': total - base_target})
+    return bets
+
+
+def calculate_match_count(bet_numbers, draw_numbers, draw_special):
+    bet_main = bet_numbers[:6]
+    bet_special = bet_numbers[6] if len(bet_numbers) > 6 else None
+    main_match = len(set(bet_main) & set(draw_numbers))
+    special_match = (bet_special == draw_special) if bet_special is not None and draw_special is not None else False
+    if special_match:
+        return main_match + 0.5
+    else:
+        return float(main_match)
+
+
+def parse_check_draws(text):
+    lines = text.strip().split('\n')
+    draws = []
+    for line in lines:
+        if not line.strip():
+            continue
+        parts = line.replace(',', '\t').replace(' ', '\t').split('\t')
+        parts = [p.strip() for p in parts if p.strip()]
+        if len(parts) >= 9:
+            try:
+                nums = []
+                for i in range(2, 9):
+                    if i < len(parts):
+                        num = int(float(parts[i]))
+                        nums.append(num)
+                if len(nums) == 7:
+                    draws.append({
+                        'period': parts[0],
+                        'date': parts[1],
+                        'numbers': sorted(nums[:6]),
+                        'special': nums[6]
+                    })
+            except (ValueError, IndexError):
+                continue
+    return draws
+
+
+def check_password(password):
+    return hmac.compare_digest(password, "Ku_product$2026")
+
+
+if 'admin_logged_in' not in st.session_state:
+    st.session_state['admin_logged_in'] = False
+if 'show_admin' not in st.session_state:
+    st.session_state['show_admin'] = False
+if 'preview_draws' not in st.session_state:
+    st.session_state['preview_draws'] = None
+if 'generated_bets' not in st.session_state:
+    st.session_state['generated_bets'] = None
+if 'num_count' not in st.session_state:
+    st.session_state['num_count'] = 7
+
+
+col_title, col_settings = st.columns([0.95, 0.05])
+with col_settings:
+    if st.button("⚙️", key="settings_icon", help="管理员设置"):
+        st.session_state['show_admin'] = not st.session_state.get('show_admin', False)
+
+
+if st.session_state.get('show_admin', False):
+    if not st.session_state['admin_logged_in']:
+        with st.expander("🔐 管理员登录", expanded=True):
+            with st.form("admin_login_form"):
+                username = st.text_input("用户名")
+                password = st.text_input("密码", type="password")
+                submitted = st.form_submit_button("登录")
+                if submitted:
+                    if username == "Laurence_ku" and check_password(password):
+                        st.session_state['admin_logged_in'] = True
+                        st.session_state['show_admin'] = False
+                        st.success("登录成功！")
+                        st.rerun()
+                    else:
+                        st.error("用户名或密码错误")
+    else:
+        with st.expander("🔧 管理员控制台", expanded=True):
+            st.subheader("📁 历史数据管理")
+            current_draws = load_draws_from_supabase()
+            if current_draws:
+                st.success(f"当前云端有 {len(current_draws)} 期数据")
+            else:
+                st.info("云端暂无数据")
+            st.markdown("---")
+            admin_input_method = st.radio("选择数据输入方式", ["粘贴数据", "上传Excel文件"], horizontal=True)
+            parsed_draws = None
+            if admin_input_method == "粘贴数据":
+                admin_pasted = st.text_area("粘贴历史数据", height=300)
+                if admin_pasted and st.button("预览数据"):
+                    parsed_draws = parse_pasted_data(admin_pasted)
+                    if parsed_draws:
+                        st.session_state['preview_draws'] = parsed_draws
+                        st.success(f"成功解析 {len(parsed_draws)} 期数据")
+                        st.dataframe(pd.DataFrame(parsed_draws[-20:]), use_container_width=True)
+                    else:
+                        st.error("数据解析失败")
+                if st.session_state.get('preview_draws') is not None:
+                    parsed_draws = st.session_state['preview_draws']
+            else:
+                admin_file = st.file_uploader("上传Excel文件", type=['xlsx', 'xls'])
+                if admin_file and st.button("预览数据"):
+                    parsed_draws = parse_excel_file(admin_file)
+                    if parsed_draws:
+                        st.session_state['preview_draws'] = parsed_draws
+                        st.success(f"成功解析 {len(parsed_draws)} 期数据")
+                        st.dataframe(pd.DataFrame(parsed_draws[-20:]), use_container_width=True)
+                    else:
+                        st.error("数据解析失败")
+                if st.session_state.get('preview_draws') is not None:
+                    parsed_draws = st.session_state['preview_draws']
+            if parsed_draws:
+                if st.button("保存到Supabase", type="primary"):
+                    with st.spinner("正在保存..."):
+                        if save_draws_to_supabase(parsed_draws):
+                            st.success(f"成功保存 {len(parsed_draws)} 期数据到Supabase！")
+                            st.session_state['preview_draws'] = None
+                            st.balloons()
+                            st.rerun()
+                        else:
+                            st.error("保存失败")
+            if st.button("退出登录"):
+                st.session_state['admin_logged_in'] = False
+                st.session_state['show_admin'] = False
+                st.rerun()
+
+
+with st.sidebar:
+    st.title("六合彩AI分析工具")
+    st.markdown("---")
+    with st.expander("中央趋向定理", expanded=False):
+        st.markdown("- 理论和值（7码）: 175\n- 标准差: 约35\n- 约68%的组合和值在140-210之间")
+    with st.expander("冷热码计算公式", expanded=False):
+        st.latex(r"Score = 0.3*z_freq + 0.3*z_absence + 0.2*z_short + 0.2*recent")
+    with st.expander("连号/跳号概率", expanded=False):
+        st.markdown("- 至少一对连号: 55.6%\n- 至少一对跳号: 65%")
+    with st.expander("奖金结构", expanded=False):
+        st.markdown("| 等级 | 匹配 | 奖金 |\n|------|------|------|\n| 第1组 | 6 | 45%基金 |\n| 第2组 | 5+特 | 15%基金 |\n| 第3组 | 5 | 40%基金 |\n| 第4组 | 4+特 | $9,600 |\n| 第5组 | 4 | $640 |\n| 第6组 | 3+特 | $320 |\n| 第7组 | 3 | $40 |")
+
+
+st.title("六合彩AI智能选号工具")
+
+
+@st.cache_data(ttl=60)
+def get_draws_from_cloud():
+    return load_draws_from_supabase()
+
+
+draws = get_draws_from_cloud()
+
+if draws is None or len(draws) == 0:
+    st.info("请点击右上角齿轮图标，进入管理员页面导入历史数据")
+    st.stop()
+
+
+st.subheader("数据概览")
+latest_draw = draws[-1]
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("最新期次", latest_draw.get('period', 'N/A'))
+with col2:
+    st.metric("最新日期", latest_draw.get('date', 'N/A'))
+with col3:
+    st.metric("数据总量", f"{len(draws)} 期")
+
+
+st.subheader("冷热码分析")
+analysis_periods = st.number_input("分析期数", min_value=10, max_value=min(500, len(draws)), value=min(100, len(draws)), step=10)
+scores, freq, short_freq, absence, hot_numbers, cold_numbers = calculate_scores(draws, window_total=analysis_periods)
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.markdown("**热门号码 (Top 10)**")
+    hot_df = pd.DataFrame([{'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]} for num in hot_numbers[:10]])
+    st.dataframe(hot_df, use_container_width=True)
+with col2:
+    st.markdown("**冷门号码 (Bottom 10)**")
+    cold_df = pd.DataFrame([{'号码': num, '得分': f"{scores[num]:.2f}", '总次数': freq[num], '缺席次数': absence[num]} for num in cold_numbers[:10]])
+    st.dataframe(cold_df, use_container_width=True)
+with col3:
+    st.markdown("**近期活跃**")
+    recent_active = [num for num in range(1, 50) if any(num in draw['numbers'] for draw in draws[-10:])]
+    st.write(f"近10期出现过的号码: {len(recent_active)}个")
+    st.write(sorted(recent_active)[:15])
+
+
+st.subheader("和值趋势分析（7个号码）")
+show_periods = st.slider("显示最近期数", min_value=10, max_value=min(200, len(draws)), value=min(100, len(draws)), step=10)
+sum_7_values = [convert_6sum_to_7sum(draw['sum']) for draw in draws[-show_periods:]]
+sum_df = pd.DataFrame([{'期次': i+1, '和值(7码)': val} for i, val in enumerate(sum_7_values)])
+fig = px.line(sum_df, x='期次', y='和值(7码)', title=f'最近{show_periods}期和值走势')
+fig.add_hline(y=175, line_dash="dash", line_color="red", annotation_text="理论均值(175)")
+st.plotly_chart(fig, use_container_width=True)
+
+sum_stats = pd.DataFrame(sum_7_values, columns=['和值(7码)'])
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("平均和值", f"{sum_stats['和值(7码)'].mean():.1f}")
+with col2:
+    st.metric("最大和值", f"{sum_stats['和值(7码)'].max()}")
+with col3:
+    st.metric("最小和值", f"{sum_stats['和值(7码)'].min()}")
+with col4:
+    st.metric("标准差", f"{sum_stats['和值(7码)'].std():.1f}")
+
+
+st.subheader("智能投注生成")
+next_period = latest_draw.get('period', 0) + 1 if isinstance(latest_draw.get('period'), int) else "N/A"
+st.info(f"预测下一期: {next_period}")
+
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    num_bets = st.number_input("购买注数", min_value=1, max_value=10, value=4, step=1)
+with col2:
+    num_count = st.selectbox("每注号码个数", [6, 7, 8, 9, 10], index=1)
+with col3:
+    strategy = st.selectbox("购买策略", ["和值大中小", "和值趋势预测", "混合策略"])
+with col4:
+    require_pattern = st.selectbox("连号/跳号要求", ["是", "否"], index=0)
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    trend_window = st.number_input("趋势预测窗口", min_value=3, max_value=20, value=5, step=1)
+with col2:
+    selected_date = st.date_input("开奖日期", value=datetime.now())
+    use_dynamic_seed = st.selectbox("Random Seed模式", ["使用选定日期+21:30", "固定种子1", "固定种子3", "固定种子5", "固定种子7", "固定种子9", "完全随机"], index=0)
+with col3:
+    use_analysis_periods = st.number_input("分析期数", min_value=10, max_value=min(500, len(draws)), value=min(100, len(draws)), step=10)
+
+if use_dynamic_seed == "使用选定日期+21:30":
+    random_seed = int(selected_date.strftime("%Y%m%d") + "2130")
+    seed_display = f"{selected_date.strftime('%Y-%m-%d')} 21:30"
+elif use_dynamic_seed == "完全随机":
+    random_seed = None
+    seed_display = "完全随机"
+else:
+    random_seed = int(use_dynamic_seed.split("种子")[1])
+    seed_display = use_dynamic_seed
+
+if st.button("生成智能投注", type="primary"):
+    scores, _, _, _, hot_numbers, cold_numbers = calculate_scores(draws, window_total=use_analysis_periods)
+    bets = generate_bets_by_strategy(draws, scores, hot_numbers, cold_numbers, num_bets, strategy, num_count, require_pattern == "是", trend_window, random_seed)
+    st.markdown("### 推荐投注组合")
+    st.markdown(f"- Random Seed: `{seed_display}`\n- 冷码探索注: 已启用（约10%注数允许包含冷码）")
+    bets_data = []
+    base_target = get_target_sum_by_numbers_count(num_count)
+    for i, bet in enumerate(bets, 1):
+        numbers_display = ' '.join(str(n) for n in sorted(bet['numbers']))
+        bets_data.append({'注数': i, '推荐号码': numbers_display, '和值': bet['sum'], '目标策略': bet['target'], '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0"})
+    st.dataframe(pd.DataFrame(bets_data), use_container_width=True, hide_index=True)
+    st.session_state['generated_bets'] = bets
+    st.session_state['num_count'] = num_count
+
+
+if st.session_state.get('generated_bets') is not None:
+    st.markdown("---")
+    st.subheader("查奖功能")
+    st.markdown("粘贴多期开奖数据（格式：期次 日期 B1 B2 B3 B4 B5 B6 B7）")
+    check_text = st.text_area("粘贴兑奖数据", height=200)
+    if st.button("查奖"):
+        if check_text.strip():
+            check_draws = parse_check_draws(check_text)
+            if check_draws:
+                st.success(f"成功解析 {len(check_draws)} 期数据")
+                bets = st.session_state['generated_bets']
+                result_data = []
+                for i, bet in enumerate(bets, 1):
+                    numbers_sorted = sorted(bet['numbers'])
+                    numbers_display = ' '.join(str(n) for n in numbers_sorted)
+                    row = {'注数': i, '推荐号码': numbers_display, '和值': bet['sum'], '目标策略': bet['target'], '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0"}
+                    for draw in check_draws:
+                        match_count = calculate_match_count(numbers_sorted, draw['numbers'], draw['special'])
+                        row[f"{draw['period']}期"] = f"{match_count:.1f}"
+                    result_data.append(row)
+                st.dataframe(pd.DataFrame(result_data), use_container_width=True, hide_index=True)
+                st.markdown("**查奖统计**")
+                stats_data = []
+                for draw in check_draws:
+                    matches = [float(row[f"{draw['period']}期"]) for row in result_data if f"{draw['period']}期" in row]
+                    if matches:
+                        stats_data.append({'期次': draw['period'], '日期': draw['date'], '平均中奖个数': f"{np.mean(matches):.2f}", '最高中奖个数': f"{max(matches):.1f}"})
+                if stats_data:
+                    st.dataframe(pd.DataFrame(stats_data), use_container_width=True, hide_index=True)
+            else:
+                st.error("数据解析失败")
+        else:
+            st.warning("请粘贴兑奖数据")
+
 st.markdown("---")
 st.caption("注意: 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
