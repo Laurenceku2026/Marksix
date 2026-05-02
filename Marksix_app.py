@@ -16,120 +16,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# ==================== 管理员验证函数 ====================
-def check_password(password):
-    """验证管理员密码"""
-    # 使用安全的比较方式
-    return hmac.compare_digest(password, "Ku_product$2026")
-
-def admin_login():
-    """管理员登录界面"""
-    with st.form("admin_login_form"):
-        username = st.text_input("用户名")
-        password = st.text_input("密码", type="password")
-        submitted = st.form_submit_button("登录")
-        
-        if submitted:
-            if username == "Laurence_ku" and check_password(password):
-                st.session_state['admin_logged_in'] = True
-                st.success("登录成功！")
-                st.rerun()
-            else:
-                st.error("用户名或密码错误")
-
-def admin_logout():
-    """管理员登出"""
-    if st.button("退出登录", key="logout_btn"):
-        st.session_state['admin_logged_in'] = False
-        st.rerun()
-
-# ==================== 初始化session state ====================
-if 'admin_logged_in' not in st.session_state:
-    st.session_state['admin_logged_in'] = False
-if 'draws' not in st.session_state:
-    st.session_state['draws'] = None
-if 'data_source' not in st.session_state:
-    st.session_state['data_source'] = None
-
-# ==================== 右上角齿轮图标 ====================
-col_title, col_settings = st.columns([0.95, 0.05])
-with col_settings:
-    if st.button("⚙️", key="settings_icon", help="管理员设置"):
-        st.session_state['show_admin'] = not st.session_state.get('show_admin', False)
-
-# 管理员弹窗
-if st.session_state.get('show_admin', False):
-    with st.expander("🔐 管理员入口", expanded=True):
-        if not st.session_state['admin_logged_in']:
-            admin_login()
-        else:
-            st.success("✅ 已登录管理员模式")
-            admin_logout()
-            
-            st.markdown("---")
-            st.subheader("📁 历史数据管理")
-            
-            # 数据输入方式
-            admin_input_method = st.radio(
-                "选择数据输入方式",
-                ["粘贴数据", "上传Excel文件"],
-                horizontal=True,
-                key="admin_input"
-            )
-            
-            if admin_input_method == "粘贴数据":
-                st.markdown("""
-                **数据格式**: 每期一行，用制表符或逗号分隔
-                期次 日期 B1 B2 B3 B4 B5 B6 B7
-                示例: 26045 2026-04-25 4 16 21 36 42 46 9
-                """)
-                
-                admin_pasted = st.text_area(
-                    "粘贴历史数据",
-                    height=400,
-                    key="admin_pasted",
-                    help="支持制表符、逗号或空格分隔"
-                )
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("保存数据", type="primary", key="save_pasted"):
-                        if admin_pasted:
-                            draws = parse_pasted_data(admin_pasted)
-                            if draws:
-                                st.session_state['draws'] = draws
-                                st.session_state['data_source'] = 'pasted'
-                                st.success(f"成功保存 {len(draws)} 期数据")
-                                st.rerun()
-                            else:
-                                st.error("数据解析失败")
-                
-            else:
-                admin_file = st.file_uploader(
-                    "上传Excel文件",
-                    type=['xlsx', 'xls'],
-                    key="admin_file"
-                )
-                
-                if admin_file:
-                    draws = parse_excel_file(admin_file)
-                    if draws:
-                        if st.button("保存数据", key="save_excel"):
-                            st.session_state['draws'] = draws
-                            st.session_state['data_source'] = 'excel'
-                            st.success(f"成功保存 {len(draws)} 期数据")
-                            st.rerun()
-            
-            # 显示当前数据状态
-            if st.session_state['draws']:
-                st.info(f"当前已加载 {len(st.session_state['draws'])} 期数据 (来源: {st.session_state['data_source']})")
-                
-                if st.button("清除数据", key="clear_data"):
-                    st.session_state['draws'] = None
-                    st.session_state['data_source'] = None
-                    st.rerun()
-
-# ==================== 核心函数 ====================
+# ==================== 核心函数（必须放在最前面） ====================
 
 def parse_pasted_data(text):
     """解析粘贴的数据文本"""
@@ -318,11 +205,7 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, analysis_period
     """根据策略生成投注"""
     bets = []
     
-    # 使用指定期数的数据
-    recent_draws = draws[-analysis_periods:] if analysis_periods <= len(draws) else draws
-    
     if strategy == "和值大中小":
-        # 大中小各一
         if num_bets >= 1:
             nums, total = generate_combination(scores, 155)
             bets.append({'numbers': nums, 'sum': total, 'target': '小和值(155)', 'deviation': total - 175})
@@ -332,26 +215,21 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, analysis_period
         if num_bets >= 3:
             nums, total = generate_combination(scores, 195)
             bets.append({'numbers': nums, 'sum': total, 'target': '大和值(195)', 'deviation': total - 175})
-        # 剩余注数用中和值填充
         for i in range(3, num_bets):
             nums, total = generate_combination(scores, 175)
             bets.append({'numbers': nums, 'sum': total, 'target': f'中和值(175) 补充{i-2}', 'deviation': total - 175})
     
     elif strategy == "和值趋势预测":
-        # 根据最近和值趋势预测
-        trend_target = predict_trend(recent_draws)
+        trend_target = predict_trend(draws)
         for i in range(num_bets):
-            # 添加轻微随机偏移
             offset = random.randint(-10, 10)
             target = trend_target + offset
             target = max(140, min(210, target))
             nums, total = generate_combination(scores, target)
             bets.append({'numbers': nums, 'sum': total, 'target': f'趋势预测(目标{target})', 'deviation': total - 175})
     
-    else:  # 混合策略
-        # 一半大中小，一半趋势预测
+    else:
         half = num_bets // 2
-        # 大中小
         if half >= 1:
             nums, total = generate_combination(scores, 155)
             bets.append({'numbers': nums, 'sum': total, 'target': '小和值(155)', 'deviation': total - 175})
@@ -361,8 +239,7 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, analysis_period
         if half >= 3:
             nums, total = generate_combination(scores, 195)
             bets.append({'numbers': nums, 'sum': total, 'target': '大和值(195)', 'deviation': total - 175})
-        # 趋势预测
-        trend_target = predict_trend(recent_draws)
+        trend_target = predict_trend(draws)
         for i in range(num_bets - half):
             offset = random.randint(-10, 10)
             target = trend_target + offset
@@ -375,7 +252,7 @@ def generate_bets_by_strategy(draws, scores, num_bets, strategy, analysis_period
 def calculate_prize(match_count, special_match):
     """根据匹配数计算奖金"""
     if match_count == 6:
-        return "第1组 (45%基金)", 0  # 金额不确定
+        return "第1组 (45%基金)", 0
     elif match_count == 5 and special_match:
         return "第2组 (15%基金)", 0
     elif match_count == 5:
@@ -397,14 +274,11 @@ def backtest(draws, scores, num_bets_per_draw, strategy, analysis_periods, train
     min_train = min(train_periods, len(draws) - 10)
     
     for i in range(min_train, len(draws)):
-        # 使用前i期数据训练
         train_draws = draws[:i]
         test_draw = draws[i]
         
-        # 重新计算得分（使用分析期数）
         train_scores, _, _, _ = calculate_scores(train_draws, window_total=analysis_periods)
         
-        # 生成投注
         bets = generate_bets_by_strategy(train_draws, train_scores, num_bets_per_draw, strategy, analysis_periods)
         
         best_match = 0
@@ -432,6 +306,116 @@ def backtest(draws, scores, num_bets_per_draw, strategy, analysis_periods, train
         })
     
     return pd.DataFrame(results)
+
+# ==================== 管理员验证函数 ====================
+def check_password(password):
+    """验证管理员密码"""
+    return hmac.compare_digest(password, "Ku_product$2026")
+
+def admin_login():
+    """管理员登录界面"""
+    with st.form("admin_login_form"):
+        username = st.text_input("用户名")
+        password = st.text_input("密码", type="password")
+        submitted = st.form_submit_button("登录")
+        
+        if submitted:
+            if username == "Laurence_ku" and check_password(password):
+                st.session_state['admin_logged_in'] = True
+                st.success("登录成功！")
+                st.rerun()
+            else:
+                st.error("用户名或密码错误")
+
+def admin_logout():
+    """管理员登出"""
+    if st.button("退出登录", key="logout_btn"):
+        st.session_state['admin_logged_in'] = False
+        st.rerun()
+
+# ==================== 初始化session state ====================
+if 'admin_logged_in' not in st.session_state:
+    st.session_state['admin_logged_in'] = False
+if 'draws' not in st.session_state:
+    st.session_state['draws'] = None
+if 'data_source' not in st.session_state:
+    st.session_state['data_source'] = None
+if 'show_admin' not in st.session_state:
+    st.session_state['show_admin'] = False
+
+# ==================== 右上角齿轮图标 ====================
+col_title, col_settings = st.columns([0.95, 0.05])
+with col_settings:
+    if st.button("⚙️", key="settings_icon", help="管理员设置"):
+        st.session_state['show_admin'] = not st.session_state.get('show_admin', False)
+
+# 管理员弹窗
+if st.session_state.get('show_admin', False):
+    with st.expander("🔐 管理员入口", expanded=True):
+        if not st.session_state['admin_logged_in']:
+            admin_login()
+        else:
+            st.success("✅ 已登录管理员模式")
+            admin_logout()
+            
+            st.markdown("---")
+            st.subheader("📁 历史数据管理")
+            
+            admin_input_method = st.radio(
+                "选择数据输入方式",
+                ["粘贴数据", "上传Excel文件"],
+                horizontal=True,
+                key="admin_input"
+            )
+            
+            if admin_input_method == "粘贴数据":
+                st.markdown("""
+                **数据格式**: 每期一行，用制表符或逗号分隔
+                期次 日期 B1 B2 B3 B4 B5 B6 B7
+                示例: 26045 2026-04-25 4 16 21 36 42 46 9
+                """)
+                
+                admin_pasted = st.text_area(
+                    "粘贴历史数据",
+                    height=400,
+                    key="admin_pasted",
+                    help="支持制表符、逗号或空格分隔"
+                )
+                
+                if st.button("保存数据", type="primary", key="save_pasted"):
+                    if admin_pasted:
+                        draws = parse_pasted_data(admin_pasted)
+                        if draws:
+                            st.session_state['draws'] = draws
+                            st.session_state['data_source'] = 'pasted'
+                            st.success(f"成功保存 {len(draws)} 期数据")
+                            st.rerun()
+                        else:
+                            st.error("数据解析失败")
+                
+            else:
+                admin_file = st.file_uploader(
+                    "上传Excel文件",
+                    type=['xlsx', 'xls'],
+                    key="admin_file"
+                )
+                
+                if admin_file:
+                    draws = parse_excel_file(admin_file)
+                    if draws:
+                        if st.button("保存数据", key="save_excel"):
+                            st.session_state['draws'] = draws
+                            st.session_state['data_source'] = 'excel'
+                            st.success(f"成功保存 {len(draws)} 期数据")
+                            st.rerun()
+            
+            if st.session_state['draws']:
+                st.info(f"当前已加载 {len(st.session_state['draws'])} 期数据 (来源: {st.session_state['data_source']})")
+                
+                if st.button("清除数据", key="clear_data"):
+                    st.session_state['draws'] = None
+                    st.session_state['data_source'] = None
+                    st.rerun()
 
 # ==================== 理论介绍（左侧边栏） ====================
 with st.sidebar:
@@ -515,7 +499,6 @@ with col2:
     st.write("")
     st.write("")
 
-# 计算冷热码
 scores, freq, short_freq, absence = calculate_scores(draws, window_total=analysis_periods)
 
 col1, col2, col3 = st.columns(3)
@@ -547,7 +530,6 @@ with col3:
 # ==================== 和值趋势分析 ====================
 st.subheader("📈 和值趋势分析")
 
-# 可以选择显示期数
 show_periods = st.slider(
     "显示最近期数",
     min_value=10,
@@ -566,7 +548,6 @@ fig.add_hline(y=175, line_dash="dash", line_color="red", annotation_text="理论
 fig.add_hrect(y0=140, y1=210, line_width=0, fillcolor="green", opacity=0.1, annotation_text="约68%区间")
 st.plotly_chart(fig, use_container_width=True)
 
-# 和值统计
 sum_stats = pd.DataFrame([draw['sum'] for draw in draws[-show_periods:]], columns=['和值'])
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -597,7 +578,7 @@ with col2:
     strategy = st.selectbox(
         "购买策略",
         ["和值大中小", "和值趋势预测", "混合策略"],
-        help="和值大中小: 覆盖小(155)、中(175)、大(195)和值区间\n和值趋势预测: 根据最近和值趋势预测\n混合策略: 结合两者"
+        help="和值大中小: 覆盖小(155)、中(175)、大(195)和值区间"
     )
 
 with col3:
@@ -612,10 +593,8 @@ with col3:
     )
 
 if st.button("🚀 生成智能投注", type="primary"):
-    # 重新计算得分
     gen_scores, _, _, _ = calculate_scores(draws, window_total=use_analysis_periods)
     
-    # 生成投注
     bets = generate_bets_by_strategy(draws, gen_scores, num_bets, strategy, use_analysis_periods)
     
     st.markdown("### 📝 推荐投注组合")
@@ -632,14 +611,18 @@ if st.button("🚀 生成智能投注", type="primary"):
                 st.write(f"目标: {bet['target']}")
             with col_d:
                 dev = bet['deviation']
-                color = "🟢" if abs(dev) < 15 else "🟡" if abs(dev) < 30 else "🔴"
+                if abs(dev) < 15:
+                    color = "🟢"
+                elif abs(dev) < 30:
+                    color = "🟡"
+                else:
+                    color = "🔴"
                 st.write(f"偏差: {color} {dev:+d}")
             
             has_pattern = has_consecutive_or_jump(bet['numbers'])
             st.caption(f"包含连号/跳号: {'✅ 是' if has_pattern else '❌ 否'}")
             st.divider()
     
-    # 预测信息
     st.info(f"""
     📊 **预测信息**
     - 使用最近 {use_analysis_periods} 期数据进行分析
@@ -677,8 +660,7 @@ with col3:
         max_value=min(500, len(draws)),
         value=min(100, len(draws)),
         step=10,
-        key="backtest_periods",
-        help="回测时使用最近N期数据计算冷热码"
+        key="backtest_periods"
     )
 
 with col4:
@@ -710,7 +692,6 @@ if run_backtest:
                 winning_draws_count = results_df[results_df['中奖等级'] != '无中奖'].shape[0]
                 avg_match_val = results_df['最佳匹配数'].mean()
                 
-                # 计算奖金
                 total_prize = results_df['奖金'].sum()
                 total_cost = len(results_df) * backtest_bets * 10
                 
@@ -733,7 +714,6 @@ if run_backtest:
                 - 净收益: **${total_prize - total_cost}**
                 """)
                 
-                # 中奖等级分布
                 st.markdown("### 📊 中奖等级分布")
                 prize_dist = results_df[results_df['中奖等级'] != '无中奖']['中奖等级'].value_counts()
                 if len(prize_dist) > 0:
@@ -744,7 +724,6 @@ if run_backtest:
                     )
                     st.plotly_chart(fig_prize, use_container_width=True)
                 
-                # 匹配数分布
                 match_dist = results_df['最佳匹配数'].value_counts().sort_index()
                 fig_match = px.bar(
                     x=match_dist.index, y=match_dist.values,
@@ -753,11 +732,10 @@ if run_backtest:
                 )
                 st.plotly_chart(fig_match, use_container_width=True)
                 
-                # 详细结果
                 with st.expander("📋 详细回测结果"):
                     st.dataframe(results_df, use_container_width=True)
             else:
-                st.warning("回测数据不足，请减少训练期数")
+                st.warning("回测数据不足")
         else:
             st.warning(f"需要至少 {train_periods + 10} 期数据才能进行回测，当前只有 {len(draws)} 期")
 
