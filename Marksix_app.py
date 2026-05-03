@@ -43,6 +43,16 @@ st.markdown("""
     .stCheckbox {
         margin-top: 10px;
     }
+    /* data_editor 单元格居中 */
+    .stDataEditor {
+        text-align: center;
+    }
+    .stDataEditor td {
+        text-align: center !important;
+    }
+    .stDataEditor th {
+        text-align: center !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -57,12 +67,16 @@ def init_supabase():
         return None
 
 def save_draws_to_supabase(draws):
+    """保存开奖数据到Supabase（覆盖保存）"""
     supabase = init_supabase()
     if supabase is None:
         return False
     try:
+        # 清空现有数据
         table = supabase.schema('marksix_schema').table('marksix_draws')
         table.delete().neq("id", 0).execute()
+        
+        # 插入新数据
         for draw in draws:
             data = {
                 "period": draw.get('period'),
@@ -78,6 +92,7 @@ def save_draws_to_supabase(draws):
         return False
 
 def load_draws_from_supabase():
+    """从Supabase加载开奖数据"""
     supabase = init_supabase()
     if supabase is None:
         return None
@@ -177,6 +192,7 @@ def get_hot_zones(zone_scores, num_hot_zones=3):
 # ==================== 核心函数 ====================
 
 def parse_pasted_data(text):
+    """解析粘贴的数据文本"""
     lines = text.strip().split('\n')
     draws = []
     for line in lines:
@@ -204,6 +220,7 @@ def parse_pasted_data(text):
     return draws
 
 def parse_multi_draws_for_checking(text, max_draws=5):
+    """解析多期开奖数据用于查奖（最多max_draws期）"""
     lines = text.strip().split('\n')
     draws = []
     for line in lines:
@@ -231,6 +248,7 @@ def parse_multi_draws_for_checking(text, max_draws=5):
     return draws
 
 def parse_excel_file(uploaded_file):
+    """解析Excel文件"""
     try:
         df = pd.read_excel(uploaded_file, sheet_name=0)
         number_cols = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
@@ -320,40 +338,30 @@ def calculate_scores(draws, window_total=100, window_short=20, window_recent=10)
     return scores, freq, short_freq, absence
 
 def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_recent=10, zone_window=20):
-    """
-    增强版评分模型
-    整合：冷热码评分 + 上期重复加分 + 隔期加分 + 分区热度加分
-    """
-    # 1. 基础冷热码评分
+    """增强版评分模型：冷热码 + 上期重复 + 隔期 + 分区热度"""
     base_scores, freq, short_freq, absence = calculate_scores(draws, window_total, window_short, window_recent)
     
-    # 2. 获取上期数据
     last_draw = draws[-1]
     last_numbers = last_draw['numbers']
     last_special = last_draw.get('special')
     last_draw_all = last_numbers + [last_special]
     
-    # 3. 获取分区热度
     zone_scores, _ = calculate_zone_heat(draws, last_n=zone_window)
     hot_zones = get_hot_zones(zone_scores, num_hot_zones=3)
     
-    # 4. 计算额外加分
     repeat_boost = {}
     for num in range(1, 50):
         boost = 0.0
         
-        # 上期重复加分
         if num in last_draw_all:
             boost += 2.0
         
-        # 隔期加分
         if len(draws) >= 2:
             prev_draw = draws[-2]
             prev_numbers = prev_draw['numbers'] + [prev_draw.get('special')]
             if num in prev_numbers and num not in last_draw_all:
                 boost += 1.0
         
-        # 前3期出现2次以上加分
         if len(draws) >= 3:
             last_3_draws = draws[-3:]
             count_in_last_3 = 0
@@ -363,7 +371,6 @@ def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_r
             if count_in_last_3 >= 2 and num not in last_draw_all:
                 boost += 0.8
         
-        # 前5期出现3次以上加分
         if len(draws) >= 5:
             last_5_draws = draws[-5:]
             count_in_last_5 = 0
@@ -373,14 +380,12 @@ def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_r
             if count_in_last_5 >= 3:
                 boost += 0.5
         
-        # 分区热度加分
         num_zone = get_zone(num)
         if num_zone in hot_zones:
             boost += 1.2
         
         repeat_boost[num] = boost
     
-    # 综合得分
     enhanced_scores = {}
     for num in range(1, 50):
         enhanced_scores[num] = base_scores[num] + repeat_boost[num]
@@ -388,6 +393,7 @@ def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_r
     return enhanced_scores, repeat_boost, hot_zones
 
 def has_consecutive_or_jump(nums):
+    """检查是否有连号或跳号"""
     nums = sorted(nums)
     for i in range(len(nums)-1):
         diff = nums[i+1] - nums[i]
@@ -396,52 +402,27 @@ def has_consecutive_or_jump(nums):
     return False
 
 def get_dynamic_sum_range(draws, num_count, window=4, sigma_factor=0.5, threshold_factor=0.1):
-    """
-    动态计算和值目标和范围（基于均值回归和标准差）
-    
-    Args:
-        draws: 历史数据
-        num_count: 号码个数 (6或7)
-        window: 近期趋势窗口（默认4期，回测最优）
-        sigma_factor: 标准差系数 (目标偏移量，推荐0.5)
-        threshold_factor: 阈值系数 (判断是否需要回归，推荐0.1)
-    
-    Returns:
-        target_sum: 目标和值
-        tolerance: 容差范围
-        direction: 趋势方向描述
-        direction_desc: 详细趋势描述
-        long_term_mean: 长期均值
-        long_term_std: 长期标准差
-        short_mean: 短期均值
-    """
-    # 计算长期统计（最近100期）
+    """动态计算和值目标和范围（基于均值回归和标准差）"""
     recent_draws = draws[-100:] if len(draws) >= 100 else draws
     all_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in recent_draws]
     long_term_mean = np.mean(all_sum_7)
     long_term_std = np.std(all_sum_7)
     
-    # 计算短期趋势（最近window期）
     short_draws = draws[-window:] if len(draws) >= window else draws
     short_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in short_draws]
     short_mean = np.mean(short_sum_7)
     
-    # 动态阈值
     threshold = long_term_std * threshold_factor
     
-    # 判断趋势方向
     if short_mean > long_term_mean + threshold:
-        # 偏大，向均值下方回归
         target = long_term_mean - long_term_std * sigma_factor
         direction = "偏大回归"
         direction_desc = f"📈 偏大 (最近{window}期均值={short_mean:.1f} > 长期均值+{threshold:.1f})"
     elif short_mean < long_term_mean - threshold:
-        # 偏小，向均值上方回归
         target = long_term_mean + long_term_std * sigma_factor
         direction = "偏小回归"
         direction_desc = f"📉 偏小 (最近{window}期均值={short_mean:.1f} < 长期均值-{threshold:.1f})"
     else:
-        # 正常
         target = long_term_mean
         direction = "正常"
         direction_desc = f"⚖️ 正常 (最近{window}期均值={short_mean:.1f} 在 ±{threshold:.1f} 范围内)"
@@ -479,16 +460,13 @@ def is_valid_combination(nums, target_sum, tolerance, require_pattern, require_p
     """检查组合是否满足约束条件"""
     total = sum(nums)
     
-    # 1. 和值检查
     if abs(total - target_sum) > tolerance:
         return False
     
-    # 2. 连号/跳号检查
     if require_pattern:
         if not has_consecutive_or_jump(nums):
             return False
     
-    # 3. 上期重复数量检查
     if require_prev_repeat and last_draw_all:
         prev_repeat_count = len(set(nums) & set(last_draw_all))
         if prev_repeat_count < 1 or prev_repeat_count > 2:
@@ -504,14 +482,12 @@ def generate_one_combination(weights, num_count, target_sum, tolerance, require_
         if is_valid_combination(selected, target_sum, tolerance, require_pattern, require_prev_repeat, last_draw_all):
             return selected, sum(selected)
     
-    # 降级：放松和值约束
     for _ in range(5000):
         selected = weighted_random_sample(weights, k=num_count)
         total = sum(selected)
         if abs(total - target_sum) <= tolerance + 5:
             return selected, total
     
-    # 最后降级
     return sorted(random.sample(range(1, 50), num_count)), sum(sorted(random.sample(range(1, 50), num_count)))
 
 def set_random_seed(seed_value):
@@ -531,30 +507,23 @@ def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_patt
     """根据策略生成投注（整合所有优化方法）"""
     set_random_seed(random_seed)
     
-    # 1. 计算增强版得分
     enhanced_scores, repeat_boost, hot_zones = calculate_enhanced_scores(draws, window_total=analysis_periods)
     
-    # 2. 获取上期数据
     last_draw = draws[-1]
     last_numbers = last_draw['numbers']
     last_special = last_draw.get('special')
     last_draw_all = last_numbers + [last_special] if require_prev_repeat else None
     
-    # 3. 计算采样权重
     weights = get_sampling_weights(enhanced_scores, temperature=1.5)
     
-    # 4. 动态和值范围
     target_sum, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window, sigma_factor=0.5, threshold_factor=0.1)
     
-    # 修正目标值范围
     base_target = get_target_sum_by_numbers_count(num_count)
     target_sum = max(base_target - 2 * tolerance, min(base_target + 2 * tolerance, target_sum))
     
-    # 注数分配：1/3大中小 + 2/3趋势
     num_trend = int(num_bets * 2 / 3)
     num_sml = num_bets - num_trend
     
-    # 大中小目标值
     sml_targets = []
     if num_sml >= 1:
         sml_targets.append(base_target - 15)
@@ -567,7 +536,6 @@ def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_patt
     
     bets = []
     
-    # 生成大中小部分
     for t in sml_targets:
         nums, total = generate_one_combination(
             weights, num_count, t, tolerance,
@@ -575,7 +543,6 @@ def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_patt
         )
         bets.append({'numbers': nums, 'sum': total, 'target': f'和值目标{t}', 'deviation': total - base_target})
     
-    # 生成趋势部分
     for i in range(num_trend):
         offset = random.randint(-tolerance, tolerance)
         t = int(target_sum + offset)
@@ -730,42 +697,242 @@ def admin_logout():
 def display_centered_dataframe(df, key=None):
     st.dataframe(df, use_container_width=True, hide_index=True, key=key)
 
-# ==================== 管理员页面 ====================
+# ==================== 管理员页面（包含可编辑表格） ====================
 def show_admin_page():
     with st.expander("🔧 管理员控制台", expanded=True):
         st.subheader("📁 历史数据管理")
+        
+        # 加载当前数据
         current_draws = load_draws_from_supabase()
         if current_draws:
             st.success(f"✅ 当前云端有 {len(current_draws)} 期数据")
             st.info(f"📊 数据范围: {current_draws[0].get('period')} 到 {current_draws[-1].get('period')}")
         else:
             st.info("📭 云端暂无数据")
+        
         st.markdown("---")
-        admin_input_method = st.radio(
-            "选择数据输入方式",
-            ["粘贴数据", "上传Excel文件"],
+        
+        # 选择编辑方式
+        edit_mode = st.radio(
+            "选择编辑方式",
+            ["📋 直接编辑表格（可编辑、删除、新增行）", "📄 粘贴数据添加", "📎 上传Excel文件"],
             horizontal=True,
-            key="admin_input"
+            key="edit_mode"
         )
+        
         parsed_draws = None
-        if admin_input_method == "粘贴数据":
+        edited_df = None
+        
+        # ========== 模式1：直接编辑表格 ==========
+        if edit_mode == "📋 直接编辑表格（可编辑、删除、新增行）":
+            st.markdown("""
+            **💡 使用说明**
+            - 双击单元格可直接编辑内容
+            - 点击行首的 `+` 可新增行
+            - 选中行后按 `Delete` 可删除行
+            - 编辑完成后点击 **💾 保存到Supabase** 按钮
+            """)
+            
+            if current_draws:
+                # 将现有数据转换为DataFrame用于编辑
+                df_current = pd.DataFrame(current_draws)
+                df_current = df_current.rename(columns={
+                    'period': '期次',
+                    'date': '開獎日期',
+                    'numbers': '正码(6个)',
+                    'special': '特码',
+                    'sum': '和值'
+                })
+                df_current['正码(6个)'] = df_current['正码(6个)'].apply(lambda x: ','.join(map(str, x)) if isinstance(x, list) else str(x))
+                
+                # 使用data_editor进行编辑
+                edited_df = st.data_editor(
+                    df_current,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic",
+                    column_config={
+                        "期次": st.column_config.NumberColumn("期次", required=True, step=1),
+                        "開獎日期": st.column_config.DateColumn("開獎日期", format="YYYY-MM-DD"),
+                        "正码(6个)": st.column_config.TextColumn("正码(6个)", required=True, help="格式: 1,2,3,4,5,6"),
+                        "特码": st.column_config.NumberColumn("特码", required=True, min_value=1, max_value=49, step=1),
+                        "和值": st.column_config.NumberColumn("和值", disabled=True, help="自动计算"),
+                    }
+                )
+                
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    if st.button("💾 保存到Supabase", type="primary", key="save_edited"):
+                        if edited_df is not None:
+                            new_draws = []
+                            errors = []
+                            
+                            for idx, row in edited_df.iterrows():
+                                try:
+                                    period = int(row['期次']) if pd.notna(row['期次']) else None
+                                    if period is None:
+                                        errors.append(f"第{idx+1}行: 期次不能为空")
+                                        continue
+                                    
+                                    date_val = row['開獎日期']
+                                    date_str = date_val.strftime("%Y-%m-%d") if pd.notna(date_val) else None
+                                    
+                                    numbers_str = str(row['正码(6个)']).strip()
+                                    if not numbers_str:
+                                        errors.append(f"第{idx+1}行: 正码不能为空")
+                                        continue
+                                    
+                                    numbers_list = []
+                                    for part in numbers_str.replace(' ', '').split(','):
+                                        if part.strip():
+                                            num = int(float(part.strip()))
+                                            if 1 <= num <= 49:
+                                                numbers_list.append(num)
+                                            else:
+                                                errors.append(f"第{idx+1}行: 正码 {num} 超出范围(1-49)")
+                                                break
+                                    
+                                    if len(numbers_list) != 6:
+                                        errors.append(f"第{idx+1}行: 正码需要6个，当前有{len(numbers_list)}个")
+                                        continue
+                                    
+                                    special = int(row['特码']) if pd.notna(row['特码']) else None
+                                    if special is None or not (1 <= special <= 49):
+                                        errors.append(f"第{idx+1}行: 特码必须在1-49之间")
+                                        continue
+                                    
+                                    new_draws.append({
+                                        'period': period,
+                                        'date': date_str,
+                                        'numbers': sorted(numbers_list),
+                                        'special': special,
+                                        'sum': sum(sorted(numbers_list))
+                                    })
+                                    
+                                except Exception as e:
+                                    errors.append(f"第{idx+1}行: 解析错误 - {str(e)}")
+                            
+                            if errors:
+                                for err in errors:
+                                    st.error(err)
+                            elif new_draws:
+                                with st.spinner("正在保存..."):
+                                    if save_draws_to_supabase(new_draws):
+                                        st.success(f"✅ 成功保存 {len(new_draws)} 期数据到Supabase！")
+                                        st.balloons()
+                                        st.rerun()
+                                    else:
+                                        st.error("保存失败")
+                            else:
+                                st.warning("没有有效数据可保存")
+                
+                with col2:
+                    if st.button("🔄 刷新数据", key="refresh_edited"):
+                        st.rerun()
+            else:
+                st.warning("📭 云端暂无数据，请通过下方方式添加数据")
+                
+                st.markdown("### ➕ 创建新数据")
+                empty_df = pd.DataFrame(columns=['期次', '開獎日期', '正码(6个)', '特码', '和值'])
+                edited_df = st.data_editor(
+                    empty_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic",
+                    column_config={
+                        "期次": st.column_config.NumberColumn("期次", required=True, step=1),
+                        "開獎日期": st.column_config.DateColumn("開獎日期", format="YYYY-MM-DD"),
+                        "正码(6个)": st.column_config.TextColumn("正码(6个)", required=True, help="格式: 1,2,3,4,5,6"),
+                        "特码": st.column_config.NumberColumn("特码", required=True, min_value=1, max_value=49, step=1),
+                        "和值": st.column_config.NumberColumn("和值", disabled=True),
+                    }
+                )
+                
+                if st.button("💾 保存到Supabase", type="primary", key="save_new"):
+                    if edited_df is not None and len(edited_df) > 0:
+                        new_draws = []
+                        errors = []
+                        for idx, row in edited_df.iterrows():
+                            try:
+                                period = int(row['期次']) if pd.notna(row['期次']) else None
+                                if period is None:
+                                    errors.append(f"第{idx+1}行: 期次不能为空")
+                                    continue
+                                
+                                date_val = row['開獎日期']
+                                date_str = date_val.strftime("%Y-%m-%d") if pd.notna(date_val) else None
+                                
+                                numbers_str = str(row['正码(6个)']).strip()
+                                if not numbers_str:
+                                    errors.append(f"第{idx+1}行: 正码不能为空")
+                                    continue
+                                
+                                numbers_list = []
+                                for part in numbers_str.replace(' ', '').split(','):
+                                    if part.strip():
+                                        num = int(float(part.strip()))
+                                        if 1 <= num <= 49:
+                                            numbers_list.append(num)
+                                        else:
+                                            errors.append(f"第{idx+1}行: 正码 {num} 超出范围")
+                                            break
+                                
+                                if len(numbers_list) != 6:
+                                    errors.append(f"第{idx+1}行: 正码需要6个")
+                                    continue
+                                
+                                special = int(row['特码']) if pd.notna(row['特码']) else None
+                                if special is None or not (1 <= special <= 49):
+                                    errors.append(f"第{idx+1}行: 特码必须在1-49之间")
+                                    continue
+                                
+                                new_draws.append({
+                                    'period': period,
+                                    'date': date_str,
+                                    'numbers': sorted(numbers_list),
+                                    'special': special,
+                                    'sum': sum(sorted(numbers_list))
+                                })
+                            except Exception as e:
+                                errors.append(f"第{idx+1}行: 解析错误 - {str(e)}")
+                        
+                        if errors:
+                            for err in errors:
+                                st.error(err)
+                        elif new_draws:
+                            with st.spinner("正在保存..."):
+                                if save_draws_to_supabase(new_draws):
+                                    st.success(f"✅ 成功保存 {len(new_draws)} 期数据到Supabase！")
+                                    st.balloons()
+                                    st.rerun()
+                                else:
+                                    st.error("保存失败")
+        
+        # ========== 模式2：粘贴数据添加 ==========
+        elif edit_mode == "📄 粘贴数据添加":
             st.markdown("""
             **数据格式**: 每期一行，用制表符或逗号分隔
             期次 日期 B1 B2 B3 B4 B5 B6 B7
             示例: 26045 2026-04-25 4 16 21 36 42 46 9
             """)
+            
             admin_pasted = st.text_area("粘贴历史数据", height=300, key="admin_pasted", help="支持制表符、逗号或空格分隔")
+            
             if admin_pasted:
                 if st.button("预览数据", key="preview_pasted"):
                     parsed_draws = parse_pasted_data(admin_pasted)
                     if parsed_draws:
                         st.session_state['preview_draws'] = parsed_draws
                         st.success(f"成功解析 {len(parsed_draws)} 期数据")
-                        display_centered_dataframe(pd.DataFrame(parsed_draws[-20:]))
+                        preview_df = pd.DataFrame(parsed_draws[-20:])
+                        display_centered_dataframe(preview_df)
                     else:
                         st.error("数据解析失败")
+                
                 if st.session_state.get('preview_draws') is not None:
                     parsed_draws = st.session_state['preview_draws']
+        
+        # ========== 模式3：上传Excel文件 ==========
         else:
             admin_file = st.file_uploader("上传Excel文件", type=['xlsx', 'xls'], key="admin_file")
             if admin_file:
@@ -777,14 +944,18 @@ def show_admin_page():
                         display_centered_dataframe(pd.DataFrame(parsed_draws[-20:]))
                     else:
                         st.error("数据解析失败")
+                
                 if st.session_state.get('preview_draws') is not None:
                     parsed_draws = st.session_state['preview_draws']
-        if parsed_draws:
+        
+        # 保存从粘贴/Excel解析的数据
+        if parsed_draws and edit_mode != "📋 直接编辑表格（可编辑、删除、新增行）":
             st.markdown("---")
-            st.subheader("💾 保存到云端")
+            st.subheader("💾 保存到云端（将覆盖现有数据）")
+            
             col1, col2 = st.columns([1, 1])
             with col1:
-                if st.button("☁️ 保存到Supabase", type="primary", key="save_to_supabase"):
+                if st.button("☁️ 保存到Supabase", type="primary", key="save_parsed"):
                     with st.spinner("正在保存..."):
                         if save_draws_to_supabase(parsed_draws):
                             st.success(f"成功保存 {len(parsed_draws)} 期数据到Supabase！")
@@ -793,13 +964,19 @@ def show_admin_page():
                             st.rerun()
                         else:
                             st.error("保存失败")
+            
             with col2:
-                if st.button("❌ 取消", key="cancel_save"):
+                if st.button("❌ 取消", key="cancel_parsed"):
                     st.session_state['preview_draws'] = None
                     st.rerun()
+        
         st.markdown("---")
+        
+        # ==================== 策略回测 ====================
         st.subheader("📊 策略回测")
+        
         draws = load_draws_from_supabase()
+        
         if draws is None or len(draws) == 0:
             st.warning("请先保存数据到Supabase，再进行回测")
         else:
@@ -1020,7 +1197,6 @@ fig.add_hline(y=175, line_dash="dash", line_color="red", annotation_text="理论
 fig.add_hrect(y0=140, y1=210, line_width=0, fillcolor="green", opacity=0.1, annotation_text="约68%区间")
 st.plotly_chart(fig, use_container_width=True)
 
-# 计算并显示和值统计
 all_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in draws[-100:]]
 mean_sum = np.mean(all_sum_7)
 std_sum = np.std(all_sum_7)
@@ -1034,7 +1210,6 @@ with col3:
 with col4:
     st.metric("最小和值", f"{min(all_sum_7)}")
 
-# 动态预测显示（使用默认窗口4期）
 target_sum, tolerance, direction, direction_desc, _, _, short_mean = get_dynamic_sum_range(draws, 7, window=4, sigma_factor=0.5, threshold_factor=0.1)
 st.info(f"**📊 动态和值预测**: {direction_desc} | 预测目标: {target_sum} | 容差: ±{tolerance}")
 
@@ -1101,7 +1276,6 @@ with col3:
         help="使用最近N期数据计算冷热码"
     )
 
-# 显示动态和值提示（使用用户选择的窗口）
 target_sum, tolerance, direction, direction_desc, mean_sum, std_sum, short_mean = get_dynamic_sum_range(
     draws, num_count, window=trend_window, sigma_factor=0.5, threshold_factor=0.1
 )
