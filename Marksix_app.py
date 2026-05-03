@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import random
+import math
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
@@ -38,6 +39,10 @@ st.markdown("""
     }
     .stNumberInput input {
         text-align: center;
+    }
+    /* 复选框样式 */
+    .stCheckbox {
+        margin-top: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -93,6 +98,48 @@ def load_draws_from_supabase():
         st.error(f"从Supabase加载数据失败: {e}")
         return None
 
+# ==================== 日期时间转Excel编码函数 ====================
+def datetime_to_excel_serial(dt):
+    """将datetime对象转换为Excel序列号"""
+    base_date = datetime(1900, 1, 1)
+    delta = dt - base_date
+    days = delta.days + 2  # Excel的1900年1月1日是1，但有个bug需要+2
+    seconds = delta.seconds
+    time_fraction = seconds / 86400
+    return days + time_fraction
+
+def parse_datetime_string(datetime_str):
+    """解析用户输入的日期时间字符串，返回Excel序列号整数"""
+    datetime_str = datetime_str.strip()
+    if not datetime_str:
+        return None
+    
+    # 尝试多种格式
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+        "%Y%m%d %H:%M:%S",
+        "%Y%m%d %H:%M",
+        "%Y%m%d",
+        "%Y-%m-%dT%H:%M:%S",
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(datetime_str, fmt)
+            serial = datetime_to_excel_serial(dt)
+            # 转换为整数（乘以1000000消除小数，或直接取整）
+            return int(serial * 1000000)
+        except ValueError:
+            continue
+    
+    st.warning(f"无法解析日期时间格式: {datetime_str}，将使用完全随机")
+    return None
+
 # ==================== 分区函数 ====================
 def get_zone(num):
     """获取号码所在分区 (1-7区，每区7个号码)"""
@@ -115,13 +162,12 @@ def calculate_zone_heat(draws, last_n=20):
             zone_hits[zone] += 1
             zone_trend[zone].append(idx)
     
-    # 计算每个分区的热度得分 (出现次数 + 近期趋势权重)
+    # 计算每个分区的热度得分
     zone_scores = {}
     for zone in range(1, 8):
         hits = zone_hits[zone]
-        # 近期出现次数越近权重越高
         recent_weight = 0
-        for pos in zone_trend[zone][-5:]:  # 最近5期
+        for pos in zone_trend[zone][-5:]:
             recent_weight += (5 - (last_n - pos)) if (last_n - pos) < 5 else 0
         zone_scores[zone] = hits * 1.0 + recent_weight * 0.5
     
@@ -277,7 +323,7 @@ def calculate_scores(draws, window_total=100, window_short=20, window_recent=10)
     
     return scores, freq, short_freq, absence
 
-def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_recent=10):
+def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_recent=10, zone_window=20):
     """
     增强版评分模型
     整合：冷热码评分 + 上期重复加分 + 隔期加分 + 分区热度加分
@@ -292,7 +338,7 @@ def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_r
     last_draw_all = last_numbers + [last_special]
     
     # 3. 获取分区热度
-    zone_scores, _ = calculate_zone_heat(draws, last_n=20)
+    zone_scores, _ = calculate_zone_heat(draws, last_n=zone_window)
     hot_zones = get_hot_zones(zone_scores, num_hot_zones=3)
     
     # 4. 计算额外加分
@@ -364,95 +410,82 @@ def get_sum_range_by_bets(num_bets):
     else:
         return 30
 
-def generate_combination(scores, num_count, target_sum=None, tolerance=15, require_pattern=True, 
-                         last_draw_numbers=None, last_draw_special=None, hot_zones=None):
+def get_sampling_weights(scores, temperature=1.5):
     """
-    增强版号码生成
-    整合：热码优先 + 上期重复 + 分区筛选 + 和值约束 + 连号/跳号
+    指数映射权重函数
+    使热码被抽中的概率约为冷码的30倍
     """
-    min_sum = target_sum - tolerance if target_sum is not None else 0
-    max_sum = target_sum + tolerance if target_sum is not None else 500
+    weights = {}
+    for num, score in scores.items():
+        weights[num] = math.exp(score / temperature)
+    return weights
+
+def weighted_random_sample(weights, k=7, max_attempts=100):
+    """
+    根据权重随机抽取k个不重复的号码
+    """
+    numbers = list(weights.keys())
+    weight_list = [weights[n] for n in numbers]
     
-    # 获取上期号码列表
-    last_draw_all = []
-    if last_draw_numbers and last_draw_special:
-        last_draw_all = last_draw_numbers + [last_draw_special]
+    attempts = 0
+    while attempts < max_attempts:
+        selected = random.choices(
+            population=numbers,
+            weights=weight_list,
+            k=k
+        )
+        # 检查是否有重复
+        if len(set(selected)) == k:
+            return sorted(selected)
+        attempts += 1
     
-    # 按得分排序
-    sorted_numbers = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+    # 降级：使用random.sample
+    return sorted(random.sample(numbers, k))
+
+def is_valid_combination(nums, target_sum, tolerance, require_pattern, require_prev_repeat, last_draw_all):
+    """
+    检查组合是否满足约束条件
+    """
+    total = sum(nums)
     
-    # 上期号码优先提到最前面
-    if last_draw_all:
-        prioritized = last_draw_all + [n for n in sorted_numbers if n not in last_draw_all]
-    else:
-        prioritized = sorted_numbers
+    # 1. 和值检查
+    if abs(total - target_sum) > tolerance:
+        return False
     
-    hot_numbers = prioritized[:20]  # 扩大到20个热码
-    cold_numbers = prioritized[-10:]
+    # 2. 连号/跳号检查
+    if require_pattern:
+        if not has_consecutive_or_jump(nums):
+            return False
     
-    # 获取热区号码池
-    hot_zone_numbers = []
-    if hot_zones:
-        for zone in hot_zones:
-            hot_zone_numbers.extend(get_zone_numbers(zone))
+    # 3. 上期重复数量检查
+    if require_prev_repeat and last_draw_all:
+        prev_repeat_count = len(set(nums) & set(last_draw_all))
+        if prev_repeat_count < 1 or prev_repeat_count > 2:
+            return False
     
-    max_attempts = 50000
+    return True
+
+def generate_one_combination(weights, num_count, target_sum, tolerance, require_pattern, require_prev_repeat, last_draw_all):
+    """
+    生成一注符合约束条件的号码
+    """
+    max_attempts = 10000
     for _ in range(max_attempts):
-        selected = set()
+        # 按权重随机抽取
+        selected = weighted_random_sample(weights, k=num_count)
         
-        # 1. 强制包含1-2个上期重复号码
-        if last_draw_all:
-            num_prev = random.randint(1, 2)
-            prev_pool = [n for n in last_draw_all if n not in selected]
-            if len(prev_pool) >= num_prev:
-                selected.update(random.sample(prev_pool, num_prev))
-        
-        # 2. 再从热区中选1-2个
-        remaining_hot_zone = [n for n in hot_zone_numbers if n not in selected and n in hot_numbers]
-        num_zone = min(random.randint(1, 2), num_count - len(selected))
-        if len(remaining_hot_zone) >= num_zone:
-            selected.update(random.sample(remaining_hot_zone, num_zone))
-        
-        # 3. 再从热码中补充
-        remaining_hot = [n for n in hot_numbers if n not in selected]
-        num_hot = min(random.randint(1, 2), num_count - len(selected))
-        if len(remaining_hot) >= num_hot:
-            selected.update(random.sample(remaining_hot, num_hot))
-        
-        # 4. 从剩余号码中选满（避开前5冷码）
-        remaining = [n for n in range(1, 50) if n not in selected and n not in cold_numbers[:5]]
-        if len(remaining) < num_count - len(selected):
-            continue
-        selected.update(random.sample(remaining, num_count - len(selected)))
-        
-        nums = sorted(selected)
-        total = sum(nums)
-        
-        # 检查和值约束
-        if target_sum is not None:
-            if not (min_sum <= total <= max_sum):
-                continue
-        
-        # 检查连号/跳号
-        if require_pattern:
-            if has_consecutive_or_jump(nums):
-                return nums, total
-        else:
-            return nums, total
+        # 检查约束
+        if is_valid_combination(selected, target_sum, tolerance, require_pattern, require_prev_repeat, last_draw_all):
+            return selected, sum(selected)
     
-    # 降级处理
-    for _ in range(10000):
-        nums = sorted(random.sample(range(1, 50), num_count))
-        total = sum(nums)
-        if target_sum is not None:
-            if not (min_sum <= total <= max_sum):
-                continue
-        if require_pattern:
-            if has_consecutive_or_jump(nums):
-                return nums, total
-        else:
-            return nums, total
+    # 降级：放松约束再试一次
+    for _ in range(5000):
+        selected = weighted_random_sample(weights, k=num_count)
+        total = sum(selected)
+        if abs(total - target_sum) <= tolerance + 5:
+            return selected, total
     
+    # 最后降级：完全随机
     return sorted(random.sample(range(1, 50), num_count)), sum(sorted(random.sample(range(1, 50), num_count)))
 
 def predict_trend_7code(draws, window=5):
@@ -477,123 +510,79 @@ def get_trend_target_sum(trend, num_count):
     else:
         return base_sum
 
-def set_random_seed(seed_input):
-    if seed_input is not None:
+def set_random_seed(seed_value):
+    """设置随机种子"""
+    if seed_value is not None:
         try:
-            random.seed(seed_input)
-            np.random.seed(seed_input)
+            random.seed(seed_value)
+            np.random.seed(seed_value)
         except (ValueError, TypeError):
-            random.seed(42)
-            np.random.seed(42)
+            random.seed()
+            np.random.seed()
     else:
         random.seed()
         np.random.seed()
 
-def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_pattern, trend_window, seed_input):
+def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_pattern, require_prev_repeat, trend_window, random_seed, analysis_periods):
     """根据策略生成投注（整合所有优化方法）"""
-    set_random_seed(seed_input)
+    set_random_seed(random_seed)
     
     # 1. 计算增强版得分（整合冷热码+重复+分区）
-    enhanced_scores, repeat_boost, hot_zones = calculate_enhanced_scores(draws)
+    enhanced_scores, repeat_boost, hot_zones = calculate_enhanced_scores(draws, window_total=analysis_periods)
     
     # 2. 获取上期数据
     last_draw = draws[-1]
     last_numbers = last_draw['numbers']
     last_special = last_draw.get('special')
+    last_draw_all = last_numbers + [last_special] if require_prev_repeat else None
     
-    # 3. 根据注数动态获取和值偏移量
+    # 3. 计算采样权重（指数映射）
+    weights = get_sampling_weights(enhanced_scores, temperature=1.5)
+    
+    # 4. 根据注数动态获取和值偏移量
     sum_offset = get_sum_range_by_bets(num_bets)
     
     bets = []
     base_target = get_target_sum_by_numbers_count(num_count)
     
-    if strategy == "和值大中小":
-        if num_bets >= 1:
-            nums, total = generate_combination(
-                enhanced_scores, num_count, base_target - sum_offset, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'小和值({base_target-sum_offset})', 'deviation': total - base_target})
-        if num_bets >= 2:
-            nums, total = generate_combination(
-                enhanced_scores, num_count, base_target, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'中和值({base_target})', 'deviation': total - base_target})
-        if num_bets >= 3:
-            nums, total = generate_combination(
-                enhanced_scores, num_count, base_target + sum_offset, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'大和值({base_target+sum_offset})', 'deviation': total - base_target})
-        for i in range(3, num_bets):
-            choice = random.choice(['小', '中', '大'])
-            if choice == '小':
-                target = base_target - sum_offset
-            elif choice == '大':
-                target = base_target + sum_offset
-            else:
-                target = base_target
-            nums, total = generate_combination(
-                enhanced_scores, num_count, target, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'{choice}和值(目标{target})', 'deviation': total - base_target})
+    # 计算注数分配
+    num_trend = int(num_bets * 2 / 3)  # 2/3 按趋势
+    num_small_medium_large = num_bets - num_trend  # 1/3 大中小
     
-    elif strategy == "和值趋势预测":
-        trend = predict_trend_7code(draws, window=trend_window)
-        if trend == "小":
-            trend_target = base_target - sum_offset
-        elif trend == "大":
-            trend_target = base_target + sum_offset
-        else:
-            trend_target = base_target
-        for i in range(num_bets):
-            offset = random.randint(-sum_offset, sum_offset)
-            target = trend_target + offset
-            target = max(25 * num_count - 2 * sum_offset, min(25 * num_count + 2 * sum_offset, target))
-            nums, total = generate_combination(
-                enhanced_scores, num_count, target, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'{trend}和值趋势(目标{target})', 'deviation': total - base_target})
+    # 获取趋势
+    trend = predict_trend_7code(draws, window=trend_window)
+    trend_target = get_trend_target_sum(trend, num_count)
     
-    else:
-        half = max(1, num_bets // 2)
-        if half >= 1:
-            nums, total = generate_combination(
-                enhanced_scores, num_count, base_target - sum_offset, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'小和值({base_target-sum_offset})', 'deviation': total - base_target})
-        if half >= 2:
-            nums, total = generate_combination(
-                enhanced_scores, num_count, base_target, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'中和值({base_target})', 'deviation': total - base_target})
-        if half >= 3:
-            nums, total = generate_combination(
-                enhanced_scores, num_count, base_target + sum_offset, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'大和值({base_target+sum_offset})', 'deviation': total - base_target})
-        trend = predict_trend_7code(draws, window=trend_window)
-        if trend == "小":
-            trend_target = base_target - sum_offset
-        elif trend == "大":
-            trend_target = base_target + sum_offset
-        else:
-            trend_target = base_target
-        for i in range(num_bets - half):
-            offset = random.randint(-sum_offset, sum_offset)
-            target = trend_target + offset
-            target = max(25 * num_count - 2 * sum_offset, min(25 * num_count + 2 * sum_offset, target))
-            nums, total = generate_combination(
-                enhanced_scores, num_count, target, sum_offset, 
-                require_pattern, last_numbers, last_special, hot_zones
-            )
-            bets.append({'numbers': nums, 'sum': total, 'target': f'{trend}和值趋势(目标{target})', 'deviation': total - base_target})
+    # 生成大中小部分
+    sml_targets = []
+    if num_small_medium_large >= 1:
+        sml_targets.append(base_target - 15)  # 小
+    if num_small_medium_large >= 2:
+        sml_targets.append(base_target)       # 中
+    if num_small_medium_large >= 3:
+        sml_targets.append(base_target + 15)  # 大
+    
+    # 补充剩余的大中小注
+    while len(sml_targets) < num_small_medium_large:
+        sml_targets.append(random.choice([base_target - 15, base_target, base_target + 15]))
+    
+    for target in sml_targets:
+        nums, total = generate_one_combination(
+            weights, num_count, target, sum_offset,
+            require_pattern, require_prev_repeat, last_draw_all
+        )
+        bets.append({'numbers': nums, 'sum': total, 'target': f'和值目标{target}', 'deviation': total - base_target})
+    
+    # 生成趋势部分（增加随机偏移）
+    for i in range(num_trend):
+        offset = random.randint(-sum_offset, sum_offset)
+        target = trend_target + offset
+        target = max(25 * num_count - 2 * sum_offset, min(25 * num_count + 2 * sum_offset, target))
+        nums, total = generate_one_combination(
+            weights, num_count, target, sum_offset,
+            require_pattern, require_prev_repeat, last_draw_all
+        )
+        bets.append({'numbers': nums, 'sum': total, 'target': f'{trend}和值趋势(目标{target})', 'deviation': total - base_target})
     
     return bets
 
@@ -640,8 +629,8 @@ def calculate_prize(match_count, special_match):
     else:
         return "无中奖", 0
 
-def backtest_strategy(draws, num_bets_per_draw, strategy, num_count, require_pattern, trend_window, analysis_periods, test_periods, seed_input):
-    set_random_seed(seed_input)
+def backtest_strategy(draws, num_bets_per_draw, strategy, num_count, require_pattern, require_prev_repeat, trend_window, analysis_periods, test_periods, random_seed):
+    set_random_seed(random_seed)
     if len(draws) < test_periods + analysis_periods:
         return None, f"数据不足：需要至少 {test_periods + analysis_periods} 期数据"
     results = []
@@ -651,7 +640,7 @@ def backtest_strategy(draws, num_bets_per_draw, strategy, num_count, require_pat
         test_draw = draws[i]
         bets = generate_bets_by_strategy(
             train_draws, num_bets_per_draw, strategy,
-            num_count, require_pattern, trend_window, seed_input
+            num_count, require_pattern, require_prev_repeat, trend_window, random_seed, analysis_periods
         )
         best_match = 0
         best_special_match = False
@@ -814,80 +803,45 @@ def show_admin_page():
         else:
             col1, col2, col3, col4, col5, col6 = st.columns(6)
             with col1:
-                backtest_bets = st.number_input("回测注数", min_value=1, max_value=50, value=10, step=1, key="backtest_bets")
+                backtest_bets = st.number_input("回测注数", min_value=1, max_value=100, value=10, step=1, key="backtest_bets")
             with col2:
                 backtest_strategy_selected = st.selectbox("回测策略", ["和值大中小", "和值趋势预测", "混合策略"], key="backtest_strategy")
             with col3:
                 backtest_num_count = st.selectbox("每注号码数", [6, 7, 8, 9, 10], index=1, key="backtest_num_count")
             with col4:
-                backtest_pattern = st.selectbox("连号/跳号", ["是", "否"], index=0, key="backtest_pattern")
+                backtest_pattern = st.checkbox("连号/跳号要求", value=True, key="backtest_pattern")
             with col5:
-                backtest_trend_window = st.number_input("趋势窗口", min_value=3, max_value=20, value=5, step=1, key="backtest_trend_window")
+                backtest_prev_repeat = st.checkbox("上期重复1-2个要求", value=True, key="backtest_prev_repeat")
             with col6:
+                backtest_trend_window = st.number_input("趋势窗口", min_value=3, max_value=20, value=5, step=1, key="backtest_trend_window")
+            
+            col7, col8 = st.columns(2)
+            with col7:
                 backtest_periods = st.number_input("测试期数", min_value=5, max_value=min(100, len(draws)-50), value=min(20, len(draws)-50), step=5, key="backtest_periods")
-            compare_seeds = st.button("🔬 对比多个Random Seed", type="secondary", key="compare_seeds")
+            with col8:
+                backtest_analysis = st.number_input("分析期数", min_value=10, max_value=min(500, len(draws)), value=min(100, len(draws)), step=10, key="backtest_analysis")
+            
+            # Random Seed 输入
+            backtest_seed_input = st.text_input("Random Seed (年月日/年月日时间，留空表示完全随机)", value="", key="backtest_seed_input", placeholder="例如: 2025-05-02 21:30")
+            
             run_backtest = st.button("▶️ 运行回测", type="secondary", key="run_backtest")
+            
             if run_backtest:
+                # 解析Random Seed
+                backtest_seed = None
+                if backtest_seed_input and backtest_seed_input.strip():
+                    backtest_seed = parse_datetime_string(backtest_seed_input)
+                
                 with st.spinner("正在运行回测..."):
                     results_df, error = backtest_strategy(
                         draws, backtest_bets, backtest_strategy_selected, backtest_num_count,
-                        backtest_pattern == "是", backtest_trend_window, 100, backtest_periods, 42
+                        backtest_pattern, backtest_prev_repeat, backtest_trend_window,
+                        backtest_analysis, backtest_periods, backtest_seed
                     )
                     if error:
                         st.warning(error)
                     elif results_df is not None and len(results_df) > 0:
                         display_backtest_results(results_df, backtest_bets)
-            if compare_seeds:
-                st.markdown("### 🔬 不同 Random Seed 对比测试")
-                seeds_to_test = [1, 3, 5, 7, 9]
-                comparison_results = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                for idx, seed in enumerate(seeds_to_test):
-                    status_text.text(f"正在测试 Seed: {seed}")
-                    try:
-                        results_df, error = backtest_strategy(
-                            draws, backtest_bets, backtest_strategy_selected, backtest_num_count,
-                            backtest_pattern == "是", backtest_trend_window, 100, backtest_periods, seed
-                        )
-                        if error:
-                            status_text.text(f"Seed {seed}: {error}")
-                        elif results_df is not None and len(results_df) > 0:
-                            total_draws_count = len(results_df)
-                            winning_draws_count = results_df[results_df['中奖等级'] != '无中奖'].shape[0]
-                            total_prize = results_df['奖金'].sum()
-                            total_cost = total_draws_count * backtest_bets * 10
-                            roi_val = ((total_prize - total_cost) / total_cost) * 100 if total_cost > 0 else 0
-                            comparison_results.append({
-                                'Random Seed': seed,
-                                '测试期数': total_draws_count,
-                                '中奖期数': winning_draws_count,
-                                '中奖率': f"{winning_draws_count/total_draws_count*100:.1f}%",
-                                '总投入': f"${total_cost}",
-                                '总奖金': f"${total_prize}",
-                                'ROI': f"{roi_val:+.1f}%"
-                            })
-                    except Exception as e:
-                        status_text.text(f"Seed {seed}: 错误 - {str(e)}")
-                    progress_bar.progress((idx + 1) / len(seeds_to_test))
-                status_text.text("对比完成！")
-                if comparison_results:
-                    comparison_df = pd.DataFrame(comparison_results)
-                    st.dataframe(comparison_df, use_container_width=True)
-                    win_rates = [float(r['中奖率'].replace('%', '')) for r in comparison_results]
-                    st.markdown(f"""
-                    **📊 统计分析**
-                    - 平均中奖率: **{np.mean(win_rates):.1f}%**
-                    - 中奖率标准差: **{np.std(win_rates):.2f}%**
-                    - 最高中奖率: **{max(win_rates):.1f}%**
-                    - 最低中奖率: **{min(win_rates):.1f}%**
-                    """)
-                    if np.std(win_rates) < 3:
-                        st.success("✅ 结论: Random Seed 对中奖率影响很小 (标准差 < 3%)")
-                    else:
-                        st.warning("⚠️ 结论: Random Seed 对中奖率有较大影响，建议多次运行取平均")
-                else:
-                    st.warning("回测数据不足，请检查数据或参数设置")
 
 # ==================== 初始化session state ====================
 if 'admin_logged_in' not in st.session_state:
@@ -971,7 +925,7 @@ with st.sidebar:
         | 第7组 | 3 | $40 |
         """)
     st.markdown("---")
-    st.caption("DFSS智能选号工具 v2.0 (增强版)")
+    st.caption("DFSS智能选号工具 v3.0 (增强版)")
 
 # ==================== 主页面 ====================
 st.title("🎯 六合彩AI智能选号工具")
@@ -1032,18 +986,15 @@ with col2:
     display_centered_dataframe(cold_df)
 with col3:
     st.markdown("**🔥 当前热区 (7分区)**")
-    st.markdown(f"""
-    | 分区 | 号码范围 | 热度 |
-    |------|----------|------|
-    | A区 | 01-07 | {'🔥' if 1 in hot_zones else '❄️'} |
-    | B区 | 08-14 | {'🔥' if 2 in hot_zones else '❄️'} |
-    | C区 | 15-21 | {'🔥' if 3 in hot_zones else '❄️'} |
-    | D区 | 22-28 | {'🔥' if 4 in hot_zones else '❄️'} |
-    | E区 | 29-35 | {'🔥' if 5 in hot_zones else '❄️'} |
-    | F区 | 36-42 | {'🔥' if 6 in hot_zones else '❄️'} |
-    | G区 | 43-49 | {'🔥' if 7 in hot_zones else '❄️'} |
-    """)
-    st.caption(f"当前热区: {', '.join([f'{z}区' for z in hot_zones])}")
+    hot_zones_display = []
+    for z in range(1, 8):
+        zone_range = f"{get_zone_numbers(z)[0]:02d}-{get_zone_numbers(z)[-1]:02d}"
+        hot_zones_display.append({
+            '分区': f"{chr(64+z)}区 ({zone_range})",
+            '热度': '🔥' if z in hot_zones else '❄️'
+        })
+    st.dataframe(pd.DataFrame(hot_zones_display), use_container_width=True, hide_index=True)
+    st.caption(f"当前热区: {', '.join([f'{chr(64+z)}区' for z in hot_zones])}")
 
 # ==================== 和值趋势分析（以7码显示） ====================
 st.subheader("📈 和值趋势分析（7个号码）")
@@ -1090,15 +1041,15 @@ st.subheader("🎲 智能投注生成")
 next_period = latest_period + 1 if isinstance(latest_period, int) else "N/A"
 st.info(f"🎯 **预测下一期**: {next_period}")
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 with col1:
     num_bets = st.number_input(
         "购买注数",
         min_value=1,
-        max_value=50,
+        max_value=500,
         value=10,
-        step=1,
-        help="每次购买多少注（最多50注）"
+        step=5,
+        help="每次购买多少注（最多500注）"
     )
 with col2:
     num_count = st.selectbox(
@@ -1113,13 +1064,12 @@ with col3:
         ["和值大中小", "和值趋势预测", "混合策略"],
         help="和值大中小: 覆盖小/中/大和值区间"
     )
-with col4:
-    require_pattern = st.selectbox(
-        "连号/跳号要求",
-        ["是", "否"],
-        index=0,
-        help="是否要求每注至少包含一对连号或跳号"
-    )
+
+col1, col2 = st.columns(2)
+with col1:
+    require_pattern = st.checkbox("☑ 连号/跳号要求", value=True, help="至少包含一对连号（差值为1）或跳号（差值为2）")
+with col2:
+    require_prev_repeat = st.checkbox("☑ 上期重复1-2个要求", value=True, help="至少包含1-2个上期开出的号码")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -1132,16 +1082,12 @@ with col1:
         help="和值趋势预测使用的最近期数"
     )
 with col2:
-    selected_date = st.date_input(
-        "开奖日期",
-        value=datetime.now(),
-        help="用于生成Random Seed的开奖日期"
-    )
-    use_dynamic_seed = st.selectbox(
-        "Random Seed模式",
-        ["使用选定日期+21:30", "固定种子1", "固定种子3", "固定种子5", "固定种子7", "固定种子9", "完全随机"],
-        index=0,
-        help="影响随机数生成"
+    # Random Seed 用户输入
+    seed_input = st.text_input(
+        "Random Seed (年月日/年月日时间)",
+        value="",
+        placeholder="例如: 2025-05-02 或 2025-05-02 21:30 (留空表示完全随机)",
+        help="输入年月日或年月日时间，自动转换为随机种子"
     )
 with col3:
     use_analysis_periods = st.number_input(
@@ -1158,39 +1104,41 @@ with col3:
 sum_offset = get_sum_range_by_bets(num_bets)
 st.caption(f"💡 提示：当前 {num_bets} 注，和值范围已自动放宽至 **±{sum_offset}**（覆盖 {175-sum_offset}~{175+sum_offset}），注数越多范围越大。")
 
-if use_dynamic_seed == "使用选定日期+21:30":
-    seed_value = int(selected_date.strftime("%Y%m%d") + "2130")
-    random_seed = seed_value
-    seed_display = f"{selected_date.strftime('%Y-%m-%d')} 21:30"
-elif use_dynamic_seed == "完全随机":
-    random_seed = None
-    seed_display = "完全随机"
-else:
-    random_seed = int(use_dynamic_seed.split("种子")[1])
-    seed_display = use_dynamic_seed
-
 if st.button("🚀 生成智能投注", type="primary"):
+    # 解析Random Seed
+    random_seed = None
+    if seed_input and seed_input.strip():
+        random_seed = parse_datetime_string(seed_input)
+        if random_seed:
+            st.success(f"✅ 已设置Random Seed: {random_seed}")
+        else:
+            st.warning("⚠️ 无法解析日期时间，将使用完全随机")
+    else:
+        st.info("ℹ️ 未设置Random Seed，将使用完全随机")
+    
     bets = generate_bets_by_strategy(
         draws, num_bets, strategy,
-        num_count, require_pattern == "是", trend_window, random_seed
+        num_count, require_pattern, require_prev_repeat, 
+        trend_window, random_seed, use_analysis_periods
     )
     st.session_state['generated_bets'] = bets
-    st.session_state['bets_display_seed'] = seed_display
     st.session_state['bets_require_pattern'] = require_pattern
+    st.session_state['bets_require_prev_repeat'] = require_prev_repeat
     st.session_state['bets_trend_window'] = trend_window
     st.session_state['bets_use_analysis_periods'] = use_analysis_periods
     st.session_state['bets_strategy'] = strategy
     st.session_state['bets_num_count'] = num_count
+    st.session_state['bets_num_bets'] = num_bets
 
 if st.session_state['generated_bets'] is not None:
     bets = st.session_state['generated_bets']
     st.markdown("### 📝 推荐投注组合")
     st.markdown(f"""
     **⚙️ 当前设置**
-    - Random Seed: `{st.session_state['bets_display_seed']}`
-    - 连号/跳号要求: {st.session_state['bets_require_pattern']}
+    - 连号/跳号要求: {'✓' if st.session_state['bets_require_pattern'] else '✗'}
+    - 上期重复1-2个要求: {'✓' if st.session_state['bets_require_prev_repeat'] else '✗'}
     - 趋势窗口: {st.session_state['bets_trend_window']}期
-    - 和值范围: ±{get_sum_range_by_bets(len(bets))}
+    - 和值范围: ±{get_sum_range_by_bets(st.session_state['bets_num_bets'])}
     """)
     
     bets_data = []
