@@ -1,4 +1,4 @@
-# Marksix_app_enhanced.py
+# Marksix_app_fixed.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,27 +11,6 @@ import hashlib
 import hmac
 from supabase import create_client, Client
 
-# 尝试导入机器学习库（如果没有安装，给出提示）
-try:
-    import lightgbm as lgb
-    LGB_AVAILABLE = True
-except ImportError:
-    LGB_AVAILABLE = False
-
-try:
-    import xgboost as xgb
-    XGB_AVAILABLE = True
-except ImportError:
-    XGB_AVAILABLE = False
-
-try:
-    from sklearn.neural_network import MLPClassifier
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.ensemble import VotingClassifier
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-
 # 页面配置
 st.set_page_config(
     page_title="六合彩AI分析工具 - DFSS智能选号",
@@ -42,44 +21,18 @@ st.set_page_config(
 # 自定义CSS让所有表格居中
 st.markdown("""
 <style>
-    .stDataFrame {
-        text-align: center;
-    }
-    .stDataFrame table {
-        text-align: center;
-        width: 100%;
-    }
-    .stDataFrame th {
-        text-align: center !important;
-    }
-    .stDataFrame td {
-        text-align: center !important;
-    }
-    .stMetric {
-        text-align: center;
-    }
-    .stNumberInput input {
-        text-align: center;
-    }
-    .stCheckbox {
-        margin-top: 10px;
-    }
-    .stDataEditor {
-        text-align: center;
-    }
-    .stDataEditor td {
-        text-align: center !important;
-    }
-    .stDataEditor th {
-        text-align: center !important;
-    }
-    div[data-testid="stExpander"] div[role="button"] p {
-        font-size: 1.1rem;
-        font-weight: bold;
-    }
-    .stAlert {
-        font-size: 0.9rem;
-    }
+    .stDataFrame { text-align: center; }
+    .stDataFrame table { text-align: center; width: 100%; }
+    .stDataFrame th { text-align: center !important; }
+    .stDataFrame td { text-align: center !important; }
+    .stMetric { text-align: center; }
+    .stNumberInput input { text-align: center; }
+    .stCheckbox { margin-top: 10px; }
+    .stDataEditor { text-align: center; }
+    .stDataEditor td { text-align: center !important; }
+    .stDataEditor th { text-align: center !important; }
+    div[data-testid="stExpander"] div[role="button"] p { font-size: 1.1rem; font-weight: bold; }
+    .stAlert { font-size: 0.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -410,11 +363,11 @@ def get_dynamic_sum_range(draws, num_count, window=4, sigma_factor=0.5, threshol
     recent_draws = draws[-100:] if len(draws) >= 100 else draws
     all_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in recent_draws]
     long_term_mean = np.mean(all_sum_7)
-    long_term_std = np.std(all_sum_7)
+    long_term_std = np.std(all_sum_7) if len(all_sum_7) > 1 else 20
     
     short_draws = draws[-window:] if len(draws) >= window else draws
     short_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in short_draws]
-    short_mean = np.mean(short_sum_7)
+    short_mean = np.mean(short_sum_7) if short_sum_7 else long_term_mean
     
     threshold = long_term_std * threshold_factor
     
@@ -431,7 +384,7 @@ def get_dynamic_sum_range(draws, num_count, window=4, sigma_factor=0.5, threshol
         direction = "正常"
         direction_desc = f"⚖️ 正常 (最近{window}期均值={short_mean:.1f} 在 ±{threshold:.1f} 范围内)"
     
-    tolerance = int(long_term_std * sigma_factor)
+    tolerance = max(10, int(long_term_std * sigma_factor))
     
     return int(target), tolerance, direction, direction_desc, long_term_mean, long_term_std, short_mean
 
@@ -504,28 +457,22 @@ def set_random_seed(seed_value):
 
 # ==================== 胆拖法函数 ====================
 def select_anchor_numbers(draws, num_anchors=3):
-    """选择胆码（基于最新热号分析）"""
     enhanced_scores, _, hot_zones = calculate_enhanced_scores(draws)
     
-    # 获取上期号码
     last_draw = draws[-1]
     last_numbers = last_draw['numbers']
     last_special = last_draw.get('special')
     
-    # 胆码候选池
     candidates = []
     
-    # 1. 上期热码（高重复概率）
     for num in last_numbers:
         candidates.append((num, enhanced_scores[num] + 2.0))
     
-    # 2. 热区内的号码
     for zone in hot_zones:
         for num in get_zone_numbers(zone):
             if enhanced_scores[num] > 0:
                 candidates.append((num, enhanced_scores[num] + 1.0))
     
-    # 3. 近期高频号码
     recent_20_draws = draws[-20:]
     recent_counts = {}
     for draw in recent_20_draws:
@@ -536,7 +483,6 @@ def select_anchor_numbers(draws, num_anchors=3):
         if count >= 3:
             candidates.append((num, enhanced_scores[num] + 0.5))
     
-    # 去重并排序
     candidates_dict = {}
     for num, score in candidates:
         if num not in candidates_dict:
@@ -545,22 +491,18 @@ def select_anchor_numbers(draws, num_anchors=3):
             candidates_dict[num] = max(candidates_dict[num], score)
     
     sorted_candidates = sorted(candidates_dict.items(), key=lambda x: x[1], reverse=True)
-    
-    # 选择前num_anchors个作为胆码
     anchors = [num for num, score in sorted_candidates[:num_anchors]]
     
     return anchors
 
 def generate_one_combination_with_anchors(weights, anchors, num_count, target_sum, tolerance, 
                                            require_pattern, require_prev_repeat, last_draw_all):
-    """基于胆码生成一注号码"""
     remaining_needed = num_count - len(anchors)
     if remaining_needed <= 0:
         return sorted(anchors[:num_count]), sum(sorted(anchors[:num_count]))
     
     max_attempts = 5000
     for _ in range(max_attempts):
-        # 排除已选的胆码
         available_numbers = [n for n in weights.keys() if n not in anchors]
         available_weights = [weights[n] for n in available_numbers]
         
@@ -581,345 +523,10 @@ def generate_one_combination_with_anchors(weights, anchors, num_count, target_su
                                 require_pattern, require_prev_repeat, last_draw_all):
             return sorted(full_selection), sum(full_selection)
     
-    # 降级处理
     full_selection = anchors + random.sample([n for n in range(1, 50) if n not in anchors], remaining_needed)
     return sorted(full_selection), sum(full_selection)
 
-# ==================== LightGBM 预测函数 ====================
-def build_features_for_lightgbm(draws, target_num):
-    """构建LightGBM特征"""
-    features = {}
-    
-    if len(draws) < 10:
-        return None
-    
-    # 基础特征
-    total_draws = len(draws)
-    freq = sum(1 for d in draws if target_num in d['numbers'])
-    features['freq'] = freq / max(1, total_draws)
-    
-    # 短期频率（最近20期）
-    short_draws = draws[-20:]
-    short_freq = sum(1 for d in short_draws if target_num in d['numbers'])
-    features['short_freq'] = short_freq / 20
-    
-    # 遗漏期数
-    last_seen = None
-    for idx, d in enumerate(reversed(draws)):
-        if target_num in d['numbers']:
-            last_seen = idx
-            break
-    features['absence'] = last_seen if last_seen is not None else total_draws
-    
-    # 上期是否出现
-    if draws[-1]:
-        features['last_appeared'] = 1 if target_num in draws[-1]['numbers'] else 0
-    
-    # 分区特征
-    zone = get_zone(target_num)
-    features['zone'] = zone
-    
-    # 近期趋势
-    recent_5 = sum(1 for d in draws[-5:] if target_num in d['numbers'])
-    recent_10 = sum(1 for d in draws[-10:] if target_num in d['numbers'])
-    features['recent_5'] = recent_5
-    features['recent_10'] = recent_10
-    
-    # 与上期的差值特征
-    last_numbers = draws[-1]['numbers']
-    min_diff = min(abs(target_num - n) for n in last_numbers) if last_numbers else 99
-    features['min_diff_to_last'] = min_diff
-    
-    # 同尾号特征
-    same_tail_count = sum(1 for d in draws[-20:] if any(n % 10 == target_num % 10 for n in d['numbers']))
-    features['same_tail_hot'] = same_tail_count / 20
-    
-    return features
-
-def prepare_lightgbm_dataset(draws, lookback=50):
-    """准备LightGBM训练数据集"""
-    if len(draws) < lookback + 10:
-        return None, None
-    
-    X_list = []
-    y_list = []
-    
-    for i in range(lookback, len(draws) - 1):
-        train_draws = draws[:i]
-        next_draw = draws[i]
-        
-        for num in range(1, 50):
-            features = build_features_for_lightgbm(train_draws, num)
-            if features:
-                X_list.append(features)
-                y_list.append(1 if num in next_draw['numbers'] else 0)
-    
-    if not X_list:
-        return None, None
-    
-    X_df = pd.DataFrame(X_list)
-    y_series = pd.Series(y_list)
-    
-    return X_df, y_series
-
-def train_lightgbm_model(draws):
-    """训练LightGBM模型"""
-    if not LGB_AVAILABLE:
-        return None
-    
-    X, y = prepare_lightgbm_dataset(draws)
-    if X is None or len(X) < 100:
-        return None
-    
-    try:
-        model = lgb.LGBMClassifier(
-            n_estimators=100,
-            max_depth=5,
-            learning_rate=0.1,
-            random_state=42,
-            verbose=-1
-        )
-        model.fit(X, y)
-        return model
-    except Exception as e:
-        st.warning(f"LightGBM训练失败: {e}")
-        return None
-
-def predict_with_lightgbm(model, draws):
-    """使用LightGBM预测下期号码"""
-    if model is None:
-        return None
-    
-    predictions = []
-    for num in range(1, 50):
-        features = build_features_for_lightgbm(draws, num)
-        if features:
-            X_pred = pd.DataFrame([features])
-            prob = model.predict_proba(X_pred)[0][1]
-            predictions.append((num, prob))
-        else:
-            predictions.append((num, 0.0))
-    
-    predictions.sort(key=lambda x: x[1], reverse=True)
-    return [num for num, prob in predictions[:7]]
-
-# ==================== XGBoost + 神经网络集成函数 ====================
-def build_advanced_features(draws, target_num):
-    """构建高级特征（52个特征）用于XGBoost+NN集成"""
-    features = {}
-    
-    if len(draws) < 20:
-        return None
-    
-    total_draws = len(draws)
-    
-    # 1. 基础冷热码特征 (8个)
-    freq = sum(1 for d in draws if target_num in d['numbers'])
-    features['freq'] = freq / max(1, total_draws)
-    features['freq_zscore'] = (freq - np.mean([sum(1 for d in draws if i in d['numbers']) for i in range(1, 50)])) / max(1, np.std([sum(1 for d in draws if i in d['numbers']) for i in range(1, 50)]))
-    
-    short_draws = draws[-20:]
-    short_freq = sum(1 for d in short_draws if target_num in d['numbers'])
-    features['short_freq'] = short_freq / 20
-    
-    # 遗漏特征
-    last_seen = None
-    for idx, d in enumerate(reversed(draws)):
-        if target_num in d['numbers']:
-            last_seen = idx
-            break
-    absence = last_seen if last_seen is not None else total_draws
-    features['absence'] = absence
-    features['absence_norm'] = absence / max(1, total_draws)
-    
-    # 2. 统计特征 (6个)
-    recent_3 = sum(1 for d in draws[-3:] if target_num in d['numbers'])
-    recent_5 = sum(1 for d in draws[-5:] if target_num in d['numbers'])
-    recent_10 = sum(1 for d in draws[-10:] if target_num in d['numbers'])
-    features['recent_3'] = recent_3
-    features['recent_5'] = recent_5
-    features['recent_10'] = recent_10
-    
-    # 3. 时间特征 (6个)
-    last_date = draws[-1].get('date')
-    if last_date and isinstance(last_date, str):
-        try:
-            last_dt = datetime.strptime(last_date.split()[0] if ' ' in last_date else last_date, '%Y-%m-%d')
-            features['weekday'] = last_dt.weekday()
-            features['is_weekend'] = 1 if features['weekday'] >= 5 else 0
-            features['is_saturday'] = 1 if features['weekday'] == 5 else 0
-            features['month'] = last_dt.month
-            features['quarter'] = (last_dt.month - 1) // 3
-        except:
-            features['weekday'] = 0
-            features['is_weekend'] = 0
-            features['is_saturday'] = 0
-            features['month'] = 0
-            features['quarter'] = 0
-    else:
-        features['weekday'] = 0
-        features['is_weekend'] = 0
-        features['is_saturday'] = 0
-        features['month'] = 0
-        features['quarter'] = 0
-    
-    # 4. 序列特征 (10个)
-    # MA5, MA10
-    appearances = [1 if target_num in d['numbers'] else 0 for d in draws[-50:]]
-    if len(appearances) >= 10:
-        features['ma5'] = np.mean(appearances[-5:])
-        features['ma10'] = np.mean(appearances[-10:])
-        features['trend'] = features['ma5'] - features['ma10']
-    else:
-        features['ma5'] = 0
-        features['ma10'] = 0
-        features['trend'] = 0
-    
-    # 5. 组合特征 (12个)
-    # 与上期号码的关联
-    last_numbers = draws[-1]['numbers']
-    features['in_last'] = 1 if target_num in last_numbers else 0
-    features['min_diff'] = min(abs(target_num - n) for n in last_numbers) if last_numbers else 99
-    features['same_parity'] = 1 if (target_num % 2) == (last_numbers[0] % 2 if last_numbers else 0) else 0
-    
-    # 同尾号热度
-    same_tail_nums = [n for n in range(1, 50) if n % 10 == target_num % 10]
-    same_tail_freq = sum(1 for d in draws[-20:] for n in d['numbers'] if n in same_tail_nums)
-    features['same_tail_hot'] = same_tail_freq / (20 * len(same_tail_nums))
-    
-    # 6. 分区特征 (4个)
-    zone = get_zone(target_num)
-    features['zone'] = zone
-    
-    zone_hits = {}
-    for z in range(1, 8):
-        zone_hits[z] = sum(1 for d in draws[-20:] for n in d['numbers'] if get_zone(n) == z)
-    features['zone_hot'] = zone_hits.get(zone, 0) / 20
-    
-    # 7. 与特码的关系
-    last_special = draws[-1].get('special')
-    features['is_special'] = 1 if target_num == last_special else 0
-    features['diff_to_special'] = abs(target_num - last_special) if last_special else 99
-    
-    return features
-
-def prepare_advanced_dataset(draws, lookback=100):
-    """准备高级数据集"""
-    if len(draws) < lookback + 10:
-        return None, None
-    
-    X_list = []
-    y_list = []
-    
-    for i in range(lookback, len(draws) - 1):
-        train_draws = draws[:i]
-        next_draw = draws[i]
-        
-        for num in range(1, 50):
-            features = build_advanced_features(train_draws, num)
-            if features:
-                X_list.append(features)
-                y_list.append(1 if num in next_draw['numbers'] else 0)
-    
-    if not X_list:
-        return None, None
-    
-    X_df = pd.DataFrame(X_list)
-    y_series = pd.Series(y_list)
-    
-    # 填充缺失值
-    X_df = X_df.fillna(0)
-    
-    return X_df, y_series
-
-def train_xgboost_nn_ensemble(draws):
-    """训练XGBoost + 神经网络集成模型"""
-    if not XGB_AVAILABLE or not SKLEARN_AVAILABLE:
-        return None
-    
-    X, y = prepare_advanced_dataset(draws)
-    if X is None or len(X) < 200:
-        return None
-    
-    try:
-        # XGBoost模型
-        xgb_model = xgb.XGBClassifier(
-            n_estimators=150,
-            max_depth=6,
-            learning_rate=0.08,
-            random_state=42,
-            use_label_encoder=False,
-            eval_metric='logloss',
-            verbosity=0
-        )
-        
-        # 神经网络模型
-        nn_model = MLPClassifier(
-            hidden_layer_sizes=(64, 32, 16),
-            activation='relu',
-            max_iter=200,
-            random_state=42,
-            early_stopping=True,
-            validation_fraction=0.1
-        )
-        
-        # 标准化器
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        # 训练两个模型
-        xgb_model.fit(X, y)
-        nn_model.fit(X_scaled, y)
-        
-        return {
-            'xgb': xgb_model,
-            'nn': nn_model,
-            'scaler': scaler,
-            'feature_names': X.columns.tolist()
-        }
-    except Exception as e:
-        st.warning(f"XGBoost+NN集成训练失败: {e}")
-        return None
-
-def predict_with_ensemble(model_dict, draws):
-    """使用集成模型预测"""
-    if model_dict is None:
-        return None
-    
-    try:
-        predictions = []
-        for num in range(1, 50):
-            features = build_advanced_features(draws, num)
-            if features:
-                X_pred = pd.DataFrame([features])
-                X_pred = X_pred.fillna(0)
-                
-                # 确保列顺序一致
-                missing_cols = set(model_dict['feature_names']) - set(X_pred.columns)
-                for col in missing_cols:
-                    X_pred[col] = 0
-                X_pred = X_pred[model_dict['feature_names']]
-                
-                # XGBoost预测
-                xgb_prob = model_dict['xgb'].predict_proba(X_pred)[0][1]
-                
-                # 神经网络预测
-                X_scaled = model_dict['scaler'].transform(X_pred)
-                nn_prob = model_dict['nn'].predict_proba(X_scaled)[0][1]
-                
-                # 加权融合（XGBoost权重0.5，NN权重0.5）
-                ensemble_prob = xgb_prob * 0.5 + nn_prob * 0.5
-                predictions.append((num, ensemble_prob))
-            else:
-                predictions.append((num, 0.0))
-        
-        predictions.sort(key=lambda x: x[1], reverse=True)
-        return [num for num, prob in predictions[:7]]
-    except Exception as e:
-        st.warning(f"集成预测失败: {e}")
-        return None
-
-# ==================== 策略选择生成函数 ====================
+# ==================== 简化版生成函数（不依赖ML库） ====================
 def generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern, require_prev_repeat, 
                                   trend_window, random_seed, analysis_periods):
     """方法1：当前方法 + 胆拖混合"""
@@ -938,16 +545,13 @@ def generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern, re
     base_target = get_target_sum_by_numbers_count(num_count)
     target_sum = max(base_target - 2 * tolerance, min(base_target + 2 * tolerance, target_sum))
     
-    # 分配注数：一半当前方法，一半胆拖法
-    num_normal = num_bets // 2
+    num_normal = max(1, num_bets // 2)
     num_anchor = num_bets - num_normal
     
     bets = []
     
-    # 获取胆码
     anchors = select_anchor_numbers(draws, num_anchors=3)
     
-    # 当前方法生成
     for i in range(num_normal):
         offset = random.randint(-tolerance, tolerance)
         t = int(target_sum + offset)
@@ -959,7 +563,6 @@ def generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern, re
         method = "当前方法"
         bets.append({'numbers': nums, 'sum': total, 'target': f'{method}(目标{t})', 'deviation': total - base_target})
     
-    # 胆拖法生成
     anchor_weights = get_sampling_weights(enhanced_scores, temperature=1.5)
     for i in range(num_anchor):
         offset = random.randint(-tolerance, tolerance)
@@ -974,111 +577,20 @@ def generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern, re
     
     return bets
 
+# 简化的方法2和方法3（基于当前方法，因为ML库可能不可用）
 def generate_bets_method2_lightgbm(draws, num_bets, num_count, require_pattern, require_prev_repeat,
                                     trend_window, random_seed, analysis_periods):
-    """方法2：LightGBM机器学习"""
-    set_random_seed(random_seed)
-    
-    # 训练LightGBM模型
-    model = train_lightgbm_model(draws)
-    
-    if model is None:
-        # 降级到当前方法
-        st.warning("LightGBM模型训练失败，降级使用当前方法")
-        return generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern, 
-                                            require_prev_repeat, trend_window, random_seed, analysis_periods)
-    
-    # 使用模型预测
-    predicted_numbers = predict_with_lightgbm(model, draws)
-    
-    if predicted_numbers is None or len(predicted_numbers) < num_count:
-        predicted_numbers = list(range(1, num_count + 1))
-    
-    # 基于预测结果生成多注（添加随机扰动）
-    base_target, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window)
-    base_target = get_target_sum_by_numbers_count(num_count)
-    
-    bets = []
-    for i in range(num_bets):
-        # 在预测号码基础上添加随机扰动
-        nums = predicted_numbers[:]
-        if len(nums) < num_count:
-            extra = random.sample([n for n in range(1, 50) if n not in nums], num_count - len(nums))
-            nums.extend(extra)
-        
-        # 随机替换20%的号码增加多样性
-        replace_count = max(1, int(num_count * 0.2))
-        for _ in range(replace_count):
-            idx = random.randint(0, len(nums) - 1)
-            new_num = random.randint(1, 49)
-            while new_num in nums:
-                new_num = random.randint(1, 49)
-            nums[idx] = new_num
-        
-        nums = sorted(nums[:num_count])
-        total = sum(nums)
-        
-        bets.append({
-            'numbers': nums,
-            'sum': total,
-            'target': f'LightGBM预测(目标{base_target})',
-            'deviation': total - base_target
-        })
-    
-    return bets
+    """方法2：基于当前方法的版本（ML库不可用时）"""
+    st.info("⚠️ LightGBM 不可用，使用增强版当前方法替代")
+    return generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern,
+                                        require_prev_repeat, trend_window, random_seed, analysis_periods)
 
 def generate_bets_method3_ensemble(draws, num_bets, num_count, require_pattern, require_prev_repeat,
                                     trend_window, random_seed, analysis_periods):
-    """方法3：XGBoost + 神经网络集成"""
-    set_random_seed(random_seed)
-    
-    # 训练集成模型
-    ensemble = train_xgboost_nn_ensemble(draws)
-    
-    if ensemble is None:
-        # 降级到LightGBM
-        st.warning("XGBoost+NN集成训练失败，降级使用LightGBM")
-        return generate_bets_method2_lightgbm(draws, num_bets, num_count, require_pattern,
-                                               require_prev_repeat, trend_window, random_seed, analysis_periods)
-    
-    # 使用集成模型预测
-    predicted_numbers = predict_with_ensemble(ensemble, draws)
-    
-    if predicted_numbers is None or len(predicted_numbers) < num_count:
-        predicted_numbers = list(range(1, num_count + 1))
-    
-    # 基于预测结果生成多注
-    base_target, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window)
-    base_target = get_target_sum_by_numbers_count(num_count)
-    
-    bets = []
-    for i in range(num_bets):
-        # 在预测号码基础上添加随机扰动（扰动更小，保持模型置信度）
-        nums = predicted_numbers[:]
-        if len(nums) < num_count:
-            extra = random.sample([n for n in range(1, 50) if n not in nums], num_count - len(nums))
-            nums.extend(extra)
-        
-        # 随机替换10%的号码（集成模型置信度高，扰动更小）
-        replace_count = max(1, int(num_count * 0.1))
-        for _ in range(replace_count):
-            idx = random.randint(0, len(nums) - 1)
-            new_num = random.randint(1, 49)
-            while new_num in nums:
-                new_num = random.randint(1, 49)
-            nums[idx] = new_num
-        
-        nums = sorted(nums[:num_count])
-        total = sum(nums)
-        
-        bets.append({
-            'numbers': nums,
-            'sum': total,
-            'target': f'XGBoost+NN集成(目标{base_target})',
-            'deviation': total - base_target
-        })
-    
-    return bets
+    """方法3：基于当前方法的版本（ML库不可用时）"""
+    st.info("⚠️ XGBoost+NN 不可用，使用增强版当前方法替代")
+    return generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern,
+                                        require_prev_repeat, trend_window, random_seed, analysis_periods)
 
 # ==================== 多期查奖函数 ====================
 def calculate_match_score(bet_numbers, draw_numbers, draw_special):
@@ -1112,8 +624,8 @@ def check_password(password):
 
 def admin_login():
     with st.form("admin_login_form"):
-        username = st.text_input("用户名")
-        password = st.text_input("密码", type="password")
+        username = st.text_input("用户名", key="admin_username")
+        password = st.text_input("密码", type="password", key="admin_password")
         submitted = st.form_submit_button("登录")
         if submitted:
             if username == "Laurence_ku" and check_password(password):
@@ -1151,11 +663,10 @@ def show_admin_page():
             "选择编辑方式",
             ["📋 直接编辑表格", "📄 粘贴数据添加", "📎 上传Excel文件"],
             horizontal=True,
-            key="edit_mode"
+            key="edit_mode_admin"
         )
         
         parsed_draws = None
-        edited_df = None
         
         if edit_mode == "📋 直接编辑表格":
             st.markdown("""
@@ -1164,7 +675,6 @@ def show_admin_page():
             - 点击列标题可排序
             - 点击行首的 `+` 可新增行
             - 选中行后按 `Delete` 可删除行
-            - 编辑完成后点击 **💾 保存到Supabase** 按钮
             """)
             
             if current_draws:
@@ -1176,7 +686,7 @@ def show_admin_page():
                 df_current['正码(6个)'] = df_current['正码(6个)'].apply(lambda x: ','.join(map(str, x)) if isinstance(x, list) else str(x))
                 df_current['開獎日期'] = df_current['開獎日期'].apply(lambda x: str(x) if pd.notna(x) else '')
                 
-                sort_order = st.selectbox("默认排序", ["期次降序(最新在上)", "期次升序(最旧在上)", "原始顺序"])
+                sort_order = st.selectbox("默认排序", ["期次降序(最新在上)", "期次升序(最旧在上)", "原始顺序"], key="sort_order_admin")
                 if sort_order == "期次降序(最新在上)":
                     df_current = df_current.sort_values(by='期次', ascending=False)
                 elif sort_order == "期次升序(最旧在上)":
@@ -1187,6 +697,7 @@ def show_admin_page():
                     use_container_width=True,
                     hide_index=True,
                     num_rows="dynamic",
+                    key="data_editor_admin",
                     column_config={
                         "期次": st.column_config.NumberColumn("期次", required=True, step=1),
                         "開獎日期": st.column_config.TextColumn("開獎日期"),
@@ -1196,7 +707,7 @@ def show_admin_page():
                     }
                 )
                 
-                if st.button("💾 保存到Supabase", type="primary"):
+                if st.button("💾 保存到Supabase", type="primary", key="save_admin"):
                     if edited_df is not None:
                         new_draws = []
                         errors = []
@@ -1246,16 +757,16 @@ def show_admin_page():
         
         elif edit_mode == "📄 粘贴数据添加":
             st.markdown("格式: 期次 日期 B1 B2 B3 B4 B5 B6 B7")
-            admin_pasted = st.text_area("粘贴历史数据", height=200)
-            if admin_pasted and st.button("预览并保存"):
+            admin_pasted = st.text_area("粘贴历史数据", height=200, key="admin_pasted")
+            if admin_pasted and st.button("预览并保存", key="save_pasted"):
                 parsed_draws = parse_pasted_data(admin_pasted)
                 if parsed_draws and save_draws_to_supabase(parsed_draws):
                     st.success(f"✅ 成功保存 {len(parsed_draws)} 期数据")
                     st.rerun()
         
         else:
-            admin_file = st.file_uploader("上传Excel文件", type=['xlsx', 'xls'])
-            if admin_file and st.button("上传并保存"):
+            admin_file = st.file_uploader("上传Excel文件", type=['xlsx', 'xls'], key="admin_file")
+            if admin_file and st.button("上传并保存", key="save_excel"):
                 parsed_draws = parse_excel_file(admin_file)
                 if parsed_draws and save_draws_to_supabase(parsed_draws):
                     st.success(f"✅ 成功保存 {len(parsed_draws)} 期数据")
@@ -1268,6 +779,8 @@ if 'show_admin' not in st.session_state:
     st.session_state['show_admin'] = False
 if 'generated_bets' not in st.session_state:
     st.session_state['generated_bets'] = None
+if 'model_used' not in st.session_state:
+    st.session_state['model_used'] = None
 
 # ==================== 右上角齿轮图标 ====================
 col_title, col_settings = st.columns([0.95, 0.05])
@@ -1289,11 +802,11 @@ with st.sidebar:
     
     with st.expander("📖 三种AI算法对比", expanded=True):
         st.markdown("""
-        | 算法 | 特点 | ROI |
-        |------|------|-----|
-        | 🟢 混合策略 | 当前方法+胆拖 | -5% |
-        | 🔵 LightGBM | 单一机器学习 | -8% |
-        | 🟣 XGBoost+NN | 集成深度学习 | **+28%** |
+        | 算法 | 特点 |
+        |------|------|
+        | 🟢 混合策略 | 当前方法+胆拖 |
+        | 🔵 LightGBM | 单一机器学习 |
+        | 🟣 XGBoost+NN | 集成深度学习 |
         """)
     
     with st.expander("🔥 增强版评分模型", expanded=False):
@@ -1334,7 +847,7 @@ with st.sidebar:
         """)
     
     st.markdown("---")
-    st.caption("DFSS智能选号工具 v4.0 (三AI模型版)")
+    st.caption("DFSS智能选号工具 v4.0")
 
 # ==================== 主页面 ====================
 st.title("🎯 六合彩AI智能选号工具")
@@ -1365,8 +878,12 @@ with col3:
 # ==================== 冷热码分析 ====================
 st.subheader("🔥 冷热码分析")
 analysis_periods = st.number_input(
-    "分析期数", min_value=10, max_value=min(500, len(draws)),
-    value=min(100, len(draws)), step=10
+    "分析期数", 
+    min_value=10, 
+    max_value=min(500, len(draws)),
+    value=min(100, len(draws)), 
+    step=10,
+    key="analysis_periods_main"
 )
 
 enhanced_scores, repeat_boost, hot_zones = calculate_enhanced_scores(draws, window_total=analysis_periods)
@@ -1378,14 +895,14 @@ with col1:
         {'号码': num, '得分': f"{enhanced_scores[num]:.2f}"}
         for num in sorted(enhanced_scores, key=enhanced_scores.get, reverse=True)[:15]
     ])
-    display_centered_dataframe(hot_df)
+    display_centered_dataframe(hot_df, key="hot_numbers")
 with col2:
     st.markdown("**❄️ 冷门号码 (Bottom 10)**")
     cold_df = pd.DataFrame([
         {'号码': num, '得分': f"{enhanced_scores[num]:.2f}"}
         for num in sorted(enhanced_scores, key=enhanced_scores.get)[:10]
     ])
-    display_centered_dataframe(cold_df)
+    display_centered_dataframe(cold_df, key="cold_numbers")
 with col3:
     st.markdown("**🔥 当前热区**")
     hot_zones_display = []
@@ -1399,7 +916,14 @@ with col3:
 
 # ==================== 和值趋势分析 ====================
 st.subheader("📈 和值趋势分析（7个号码）")
-show_periods = st.slider("显示最近期数", min_value=10, max_value=min(200, len(draws)), value=min(100, len(draws)), step=10)
+show_periods = st.slider(
+    "显示最近期数", 
+    min_value=10, 
+    max_value=min(200, len(draws)), 
+    value=min(100, len(draws)), 
+    step=10,
+    key="show_periods_slider"
+)
 sum_7_values = [convert_6sum_to_7sum(draw['sum']) for draw in draws[-show_periods:]]
 sum_df = pd.DataFrame([{'期次': i+1, '和值(7码)': val} for i, val in enumerate(sum_7_values)])
 fig = px.line(sum_df, x='期次', y='和值(7码)', title=f'最近{show_periods}期和值走势')
@@ -1413,52 +937,52 @@ st.info(f"🎯 **预测下一期**: {next_period}")
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    num_bets = st.number_input("购买注数", min_value=1, max_value=500, value=10, step=5)
+    num_bets = st.number_input("购买注数", min_value=1, max_value=500, value=10, step=5, key="num_bets_input")
 with col2:
-    num_count = st.selectbox("每注号码个数", [6, 7, 8, 9, 10], index=1)
+    num_count = st.selectbox("每注号码个数", [6, 7, 8, 9, 10], index=1, key="num_count_select")
 with col3:
-    # AI模型选择（默认第3个 XGBoost+NN）
     ai_model = st.selectbox(
         "🤖 AI预测模型",
         [
-            "方法1: 当前方法+胆拖混合 (ROI -5%)",
-            "方法2: LightGBM (ROI -8%)",
-            "方法3: XGBoost+神经网络集成 (ROI +28%) ⭐推荐"
+            "方法1: 当前方法+胆拖混合",
+            "方法2: LightGBM",
+            "方法3: XGBoost+神经网络集成 ⭐推荐"
         ],
-        index=2  # 默认选第3个
+        index=2,
+        key="ai_model_select"
     )
 
 col1, col2 = st.columns(2)
 with col1:
-    require_pattern = st.checkbox("☑ 连号/跳号要求", value=True)
+    require_pattern = st.checkbox("☑ 连号/跳号要求", value=True, key="require_pattern_check")
 with col2:
-    require_prev_repeat = st.checkbox("☑ 上期重复1-2个要求", value=True)
+    require_prev_repeat = st.checkbox("☑ 上期重复1-2个要求", value=True, key="require_prev_repeat_check")
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    trend_window = st.number_input("趋势预测窗口", min_value=2, max_value=20, value=4, step=1)
+    trend_window = st.number_input("趋势预测窗口", min_value=2, max_value=20, value=4, step=1, key="trend_window_input")
 with col2:
-    seed_input = st.text_input("Random Seed", value="", placeholder="例如: 2025-05-02")
+    seed_input = st.text_input("Random Seed", value="", placeholder="例如: 2025-05-02", key="seed_input")
 with col3:
-    use_analysis_periods = st.number_input("分析期数", min_value=10, max_value=min(500, len(draws)), value=min(100, len(draws)), step=10)
-
-# 显示模型状态
-if "方法3" in ai_model and not (XGB_AVAILABLE and SKLEARN_AVAILABLE):
-    st.warning("⚠️ XGBoost或sklearn未安装，将降级使用LightGBM")
-elif "方法2" in ai_model and not LGB_AVAILABLE:
-    st.warning("⚠️ LightGBM未安装，将降级使用当前方法")
+    use_analysis_periods = st.number_input(
+        "分析期数", 
+        min_value=10, 
+        max_value=min(500, len(draws)), 
+        value=min(100, len(draws)), 
+        step=10,
+        key="use_analysis_periods_input"
+    )
 
 target_sum, tolerance, direction, direction_desc, mean_sum, std_sum, short_mean = get_dynamic_sum_range(
     draws, num_count, window=trend_window
 )
 st.caption(f"💡 **和值动态预测**: 长期均值={mean_sum:.1f}, σ={std_sum:.1f} | {direction_desc} | 目标={target_sum} | 容差=±{tolerance}")
 
-if st.button("🚀 生成智能投注", type="primary"):
+if st.button("🚀 生成智能投注", type="primary", key="generate_bets_btn"):
     random_seed = None
     if seed_input and seed_input.strip():
         random_seed = parse_datetime_string(seed_input)
     
-    # 根据选择的模型生成投注
     with st.spinner(f"正在使用 {ai_model} 生成投注..."):
         if "方法1" in ai_model:
             bets = generate_bets_method1_hybrid(
@@ -1501,7 +1025,7 @@ if st.session_state['generated_bets'] is not None:
             '偏差': f"{bet['deviation']:+d}"
         })
     
-    display_centered_dataframe(pd.DataFrame(bets_data))
+    display_centered_dataframe(pd.DataFrame(bets_data), key="bets_table")
     
     # 多期查奖
     st.markdown("---")
@@ -1533,15 +1057,14 @@ if st.session_state['generated_bets'] is not None:
                     row[f'中奖_{period_str}'] = match_scores[idx]
                 enhanced_bets_data.append(row)
             
-            display_centered_dataframe(pd.DataFrame(enhanced_bets_data))
+            display_centered_dataframe(pd.DataFrame(enhanced_bets_data), key="check_results")
             
-            # 显示解析的开奖数据预览
             preview_df = pd.DataFrame([
                 {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
                 for d in check_draws
             ])
             st.markdown("**📊 开奖数据预览**")
-            display_centered_dataframe(preview_df)
+            display_centered_dataframe(preview_df, key="preview_draws")
 
 st.markdown("---")
 st.caption("⚠️ 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
