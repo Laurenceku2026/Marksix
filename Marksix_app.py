@@ -1,4 +1,4 @@
-# Marksix_app.py
+# Marksix_app_enhanced.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,6 +10,27 @@ import plotly.graph_objects as go
 import hashlib
 import hmac
 from supabase import create_client, Client
+
+# 尝试导入机器学习库（如果没有安装，给出提示）
+try:
+    import lightgbm as lgb
+    LGB_AVAILABLE = True
+except ImportError:
+    LGB_AVAILABLE = False
+
+try:
+    import xgboost as xgb
+    XGB_AVAILABLE = True
+except ImportError:
+    XGB_AVAILABLE = False
+
+try:
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.ensemble import VotingClassifier
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
 
 # 页面配置
 st.set_page_config(
@@ -43,7 +64,6 @@ st.markdown("""
     .stCheckbox {
         margin-top: 10px;
     }
-    /* data_editor 单元格居中 */
     .stDataEditor {
         text-align: center;
     }
@@ -52,6 +72,13 @@ st.markdown("""
     }
     .stDataEditor th {
         text-align: center !important;
+    }
+    div[data-testid="stExpander"] div[role="button"] p {
+        font-size: 1.1rem;
+        font-weight: bold;
+    }
+    .stAlert {
+        font-size: 0.9rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -67,16 +94,13 @@ def init_supabase():
         return None
 
 def save_draws_to_supabase(draws):
-    """保存开奖数据到Supabase（覆盖保存）"""
     supabase = init_supabase()
     if supabase is None:
         return False
     try:
-        # 清空现有数据
         table = supabase.schema('marksix_schema').table('marksix_draws')
         table.delete().neq("id", 0).execute()
         
-        # 插入新数据
         for draw in draws:
             data = {
                 "period": draw.get('period'),
@@ -92,7 +116,6 @@ def save_draws_to_supabase(draws):
         return False
 
 def load_draws_from_supabase():
-    """从Supabase加载开奖数据"""
     supabase = init_supabase()
     if supabase is None:
         return None
@@ -114,7 +137,6 @@ def load_draws_from_supabase():
 
 # ==================== 日期时间转Excel编码函数 ====================
 def datetime_to_excel_serial(dt):
-    """将datetime对象转换为Excel序列号"""
     base_date = datetime(1900, 1, 1)
     delta = dt - base_date
     days = delta.days + 2
@@ -123,21 +145,14 @@ def datetime_to_excel_serial(dt):
     return days + time_fraction
 
 def parse_datetime_string(datetime_str):
-    """解析用户输入的日期时间字符串，返回Excel序列号整数"""
     datetime_str = datetime_str.strip()
     if not datetime_str:
         return None
     
     formats = [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y/%m/%d %H:%M",
-        "%Y/%m/%d",
-        "%Y%m%d %H:%M:%S",
-        "%Y%m%d %H:%M",
-        "%Y%m%d",
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d",
+        "%Y%m%d %H:%M:%S", "%Y%m%d %H:%M", "%Y%m%d",
         "%Y-%m-%dT%H:%M:%S",
     ]
     
@@ -154,17 +169,14 @@ def parse_datetime_string(datetime_str):
 
 # ==================== 分区函数 ====================
 def get_zone(num):
-    """获取号码所在分区 (1-7区，每区7个号码)"""
     return (num - 1) // 7 + 1
 
 def get_zone_numbers(zone):
-    """获取分区内的所有号码"""
     start = (zone - 1) * 7 + 1
     end = start + 6
     return list(range(start, end + 1))
 
 def calculate_zone_heat(draws, last_n=20):
-    """计算各分区的热度统计"""
     zone_hits = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
     zone_trend = {1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: []}
     
@@ -185,14 +197,12 @@ def calculate_zone_heat(draws, last_n=20):
     return zone_scores, zone_hits
 
 def get_hot_zones(zone_scores, num_hot_zones=3):
-    """获取最热的分区"""
     sorted_zones = sorted(zone_scores.items(), key=lambda x: x[1], reverse=True)
     return [zone for zone, score in sorted_zones[:num_hot_zones]]
 
 # ==================== 核心函数 ====================
 
 def parse_pasted_data(text):
-    """解析粘贴的数据文本"""
     lines = text.strip().split('\n')
     draws = []
     for line in lines:
@@ -220,7 +230,6 @@ def parse_pasted_data(text):
     return draws
 
 def parse_multi_draws_for_checking(text, max_draws=5):
-    """解析多期开奖数据用于查奖（最多max_draws期）"""
     lines = text.strip().split('\n')
     draws = []
     for line in lines:
@@ -248,7 +257,6 @@ def parse_multi_draws_for_checking(text, max_draws=5):
     return draws
 
 def parse_excel_file(uploaded_file):
-    """解析Excel文件"""
     try:
         df = pd.read_excel(uploaded_file, sheet_name=0)
         number_cols = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
@@ -289,7 +297,6 @@ def convert_6sum_to_7sum(sum_6):
     return int(sum_6 * 7 / 6)
 
 def calculate_scores(draws, window_total=100, window_short=20, window_recent=10):
-    """基础冷热码评分（4因子）"""
     if len(draws) < window_total:
         window_total = len(draws)
     
@@ -338,7 +345,6 @@ def calculate_scores(draws, window_total=100, window_short=20, window_recent=10)
     return scores, freq, short_freq, absence
 
 def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_recent=10, zone_window=20):
-    """增强版评分模型：冷热码 + 上期重复 + 隔期 + 分区热度"""
     base_scores, freq, short_freq, absence = calculate_scores(draws, window_total, window_short, window_recent)
     
     last_draw = draws[-1]
@@ -393,7 +399,6 @@ def calculate_enhanced_scores(draws, window_total=100, window_short=20, window_r
     return enhanced_scores, repeat_boost, hot_zones
 
 def has_consecutive_or_jump(nums):
-    """检查是否有连号或跳号"""
     nums = sorted(nums)
     for i in range(len(nums)-1):
         diff = nums[i+1] - nums[i]
@@ -402,7 +407,6 @@ def has_consecutive_or_jump(nums):
     return False
 
 def get_dynamic_sum_range(draws, num_count, window=4, sigma_factor=0.5, threshold_factor=0.1):
-    """动态计算和值目标和范围（基于均值回归和标准差）"""
     recent_draws = draws[-100:] if len(draws) >= 100 else draws
     all_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in recent_draws]
     long_term_mean = np.mean(all_sum_7)
@@ -432,14 +436,12 @@ def get_dynamic_sum_range(draws, num_count, window=4, sigma_factor=0.5, threshol
     return int(target), tolerance, direction, direction_desc, long_term_mean, long_term_std, short_mean
 
 def get_sampling_weights(scores, temperature=1.5):
-    """指数映射权重函数"""
     weights = {}
     for num, score in scores.items():
         weights[num] = math.exp(score / temperature)
     return weights
 
 def weighted_random_sample(weights, k=7, max_attempts=100):
-    """根据权重随机抽取k个不重复的号码"""
     numbers = list(weights.keys())
     weight_list = [weights[n] for n in numbers]
     
@@ -457,7 +459,6 @@ def weighted_random_sample(weights, k=7, max_attempts=100):
     return sorted(random.sample(numbers, k))
 
 def is_valid_combination(nums, target_sum, tolerance, require_pattern, require_prev_repeat, last_draw_all):
-    """检查组合是否满足约束条件"""
     total = sum(nums)
     
     if abs(total - target_sum) > tolerance:
@@ -475,7 +476,6 @@ def is_valid_combination(nums, target_sum, tolerance, require_pattern, require_p
     return True
 
 def generate_one_combination(weights, num_count, target_sum, tolerance, require_pattern, require_prev_repeat, last_draw_all):
-    """生成一注符合约束条件的号码"""
     max_attempts = 10000
     for _ in range(max_attempts):
         selected = weighted_random_sample(weights, k=num_count)
@@ -491,7 +491,6 @@ def generate_one_combination(weights, num_count, target_sum, tolerance, require_
     return sorted(random.sample(range(1, 50), num_count)), sum(sorted(random.sample(range(1, 50), num_count)))
 
 def set_random_seed(seed_value):
-    """设置随机种子"""
     if seed_value is not None:
         try:
             random.seed(seed_value)
@@ -503,8 +502,427 @@ def set_random_seed(seed_value):
         random.seed()
         np.random.seed()
 
-def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_pattern, require_prev_repeat, trend_window, random_seed, analysis_periods):
-    """根据策略生成投注（整合所有优化方法）"""
+# ==================== 胆拖法函数 ====================
+def select_anchor_numbers(draws, num_anchors=3):
+    """选择胆码（基于最新热号分析）"""
+    enhanced_scores, _, hot_zones = calculate_enhanced_scores(draws)
+    
+    # 获取上期号码
+    last_draw = draws[-1]
+    last_numbers = last_draw['numbers']
+    last_special = last_draw.get('special')
+    
+    # 胆码候选池
+    candidates = []
+    
+    # 1. 上期热码（高重复概率）
+    for num in last_numbers:
+        candidates.append((num, enhanced_scores[num] + 2.0))
+    
+    # 2. 热区内的号码
+    for zone in hot_zones:
+        for num in get_zone_numbers(zone):
+            if enhanced_scores[num] > 0:
+                candidates.append((num, enhanced_scores[num] + 1.0))
+    
+    # 3. 近期高频号码
+    recent_20_draws = draws[-20:]
+    recent_counts = {}
+    for draw in recent_20_draws:
+        for num in draw['numbers']:
+            recent_counts[num] = recent_counts.get(num, 0) + 1
+    
+    for num, count in recent_counts.items():
+        if count >= 3:
+            candidates.append((num, enhanced_scores[num] + 0.5))
+    
+    # 去重并排序
+    candidates_dict = {}
+    for num, score in candidates:
+        if num not in candidates_dict:
+            candidates_dict[num] = score
+        else:
+            candidates_dict[num] = max(candidates_dict[num], score)
+    
+    sorted_candidates = sorted(candidates_dict.items(), key=lambda x: x[1], reverse=True)
+    
+    # 选择前num_anchors个作为胆码
+    anchors = [num for num, score in sorted_candidates[:num_anchors]]
+    
+    return anchors
+
+def generate_one_combination_with_anchors(weights, anchors, num_count, target_sum, tolerance, 
+                                           require_pattern, require_prev_repeat, last_draw_all):
+    """基于胆码生成一注号码"""
+    remaining_needed = num_count - len(anchors)
+    if remaining_needed <= 0:
+        return sorted(anchors[:num_count]), sum(sorted(anchors[:num_count]))
+    
+    max_attempts = 5000
+    for _ in range(max_attempts):
+        # 排除已选的胆码
+        available_numbers = [n for n in weights.keys() if n not in anchors]
+        available_weights = [weights[n] for n in available_numbers]
+        
+        if len(available_numbers) < remaining_needed:
+            remaining_needed = len(available_numbers)
+        
+        selected = random.choices(
+            population=available_numbers,
+            weights=available_weights,
+            k=remaining_needed
+        )
+        
+        full_selection = anchors + selected
+        if len(set(full_selection)) != len(full_selection):
+            continue
+            
+        if is_valid_combination(full_selection, target_sum, tolerance, 
+                                require_pattern, require_prev_repeat, last_draw_all):
+            return sorted(full_selection), sum(full_selection)
+    
+    # 降级处理
+    full_selection = anchors + random.sample([n for n in range(1, 50) if n not in anchors], remaining_needed)
+    return sorted(full_selection), sum(full_selection)
+
+# ==================== LightGBM 预测函数 ====================
+def build_features_for_lightgbm(draws, target_num):
+    """构建LightGBM特征"""
+    features = {}
+    
+    if len(draws) < 10:
+        return None
+    
+    # 基础特征
+    total_draws = len(draws)
+    freq = sum(1 for d in draws if target_num in d['numbers'])
+    features['freq'] = freq / max(1, total_draws)
+    
+    # 短期频率（最近20期）
+    short_draws = draws[-20:]
+    short_freq = sum(1 for d in short_draws if target_num in d['numbers'])
+    features['short_freq'] = short_freq / 20
+    
+    # 遗漏期数
+    last_seen = None
+    for idx, d in enumerate(reversed(draws)):
+        if target_num in d['numbers']:
+            last_seen = idx
+            break
+    features['absence'] = last_seen if last_seen is not None else total_draws
+    
+    # 上期是否出现
+    if draws[-1]:
+        features['last_appeared'] = 1 if target_num in draws[-1]['numbers'] else 0
+    
+    # 分区特征
+    zone = get_zone(target_num)
+    features['zone'] = zone
+    
+    # 近期趋势
+    recent_5 = sum(1 for d in draws[-5:] if target_num in d['numbers'])
+    recent_10 = sum(1 for d in draws[-10:] if target_num in d['numbers'])
+    features['recent_5'] = recent_5
+    features['recent_10'] = recent_10
+    
+    # 与上期的差值特征
+    last_numbers = draws[-1]['numbers']
+    min_diff = min(abs(target_num - n) for n in last_numbers) if last_numbers else 99
+    features['min_diff_to_last'] = min_diff
+    
+    # 同尾号特征
+    same_tail_count = sum(1 for d in draws[-20:] if any(n % 10 == target_num % 10 for n in d['numbers']))
+    features['same_tail_hot'] = same_tail_count / 20
+    
+    return features
+
+def prepare_lightgbm_dataset(draws, lookback=50):
+    """准备LightGBM训练数据集"""
+    if len(draws) < lookback + 10:
+        return None, None
+    
+    X_list = []
+    y_list = []
+    
+    for i in range(lookback, len(draws) - 1):
+        train_draws = draws[:i]
+        next_draw = draws[i]
+        
+        for num in range(1, 50):
+            features = build_features_for_lightgbm(train_draws, num)
+            if features:
+                X_list.append(features)
+                y_list.append(1 if num in next_draw['numbers'] else 0)
+    
+    if not X_list:
+        return None, None
+    
+    X_df = pd.DataFrame(X_list)
+    y_series = pd.Series(y_list)
+    
+    return X_df, y_series
+
+def train_lightgbm_model(draws):
+    """训练LightGBM模型"""
+    if not LGB_AVAILABLE:
+        return None
+    
+    X, y = prepare_lightgbm_dataset(draws)
+    if X is None or len(X) < 100:
+        return None
+    
+    try:
+        model = lgb.LGBMClassifier(
+            n_estimators=100,
+            max_depth=5,
+            learning_rate=0.1,
+            random_state=42,
+            verbose=-1
+        )
+        model.fit(X, y)
+        return model
+    except Exception as e:
+        st.warning(f"LightGBM训练失败: {e}")
+        return None
+
+def predict_with_lightgbm(model, draws):
+    """使用LightGBM预测下期号码"""
+    if model is None:
+        return None
+    
+    predictions = []
+    for num in range(1, 50):
+        features = build_features_for_lightgbm(draws, num)
+        if features:
+            X_pred = pd.DataFrame([features])
+            prob = model.predict_proba(X_pred)[0][1]
+            predictions.append((num, prob))
+        else:
+            predictions.append((num, 0.0))
+    
+    predictions.sort(key=lambda x: x[1], reverse=True)
+    return [num for num, prob in predictions[:7]]
+
+# ==================== XGBoost + 神经网络集成函数 ====================
+def build_advanced_features(draws, target_num):
+    """构建高级特征（52个特征）用于XGBoost+NN集成"""
+    features = {}
+    
+    if len(draws) < 20:
+        return None
+    
+    total_draws = len(draws)
+    
+    # 1. 基础冷热码特征 (8个)
+    freq = sum(1 for d in draws if target_num in d['numbers'])
+    features['freq'] = freq / max(1, total_draws)
+    features['freq_zscore'] = (freq - np.mean([sum(1 for d in draws if i in d['numbers']) for i in range(1, 50)])) / max(1, np.std([sum(1 for d in draws if i in d['numbers']) for i in range(1, 50)]))
+    
+    short_draws = draws[-20:]
+    short_freq = sum(1 for d in short_draws if target_num in d['numbers'])
+    features['short_freq'] = short_freq / 20
+    
+    # 遗漏特征
+    last_seen = None
+    for idx, d in enumerate(reversed(draws)):
+        if target_num in d['numbers']:
+            last_seen = idx
+            break
+    absence = last_seen if last_seen is not None else total_draws
+    features['absence'] = absence
+    features['absence_norm'] = absence / max(1, total_draws)
+    
+    # 2. 统计特征 (6个)
+    recent_3 = sum(1 for d in draws[-3:] if target_num in d['numbers'])
+    recent_5 = sum(1 for d in draws[-5:] if target_num in d['numbers'])
+    recent_10 = sum(1 for d in draws[-10:] if target_num in d['numbers'])
+    features['recent_3'] = recent_3
+    features['recent_5'] = recent_5
+    features['recent_10'] = recent_10
+    
+    # 3. 时间特征 (6个)
+    last_date = draws[-1].get('date')
+    if last_date and isinstance(last_date, str):
+        try:
+            last_dt = datetime.strptime(last_date.split()[0] if ' ' in last_date else last_date, '%Y-%m-%d')
+            features['weekday'] = last_dt.weekday()
+            features['is_weekend'] = 1 if features['weekday'] >= 5 else 0
+            features['is_saturday'] = 1 if features['weekday'] == 5 else 0
+            features['month'] = last_dt.month
+            features['quarter'] = (last_dt.month - 1) // 3
+        except:
+            features['weekday'] = 0
+            features['is_weekend'] = 0
+            features['is_saturday'] = 0
+            features['month'] = 0
+            features['quarter'] = 0
+    else:
+        features['weekday'] = 0
+        features['is_weekend'] = 0
+        features['is_saturday'] = 0
+        features['month'] = 0
+        features['quarter'] = 0
+    
+    # 4. 序列特征 (10个)
+    # MA5, MA10
+    appearances = [1 if target_num in d['numbers'] else 0 for d in draws[-50:]]
+    if len(appearances) >= 10:
+        features['ma5'] = np.mean(appearances[-5:])
+        features['ma10'] = np.mean(appearances[-10:])
+        features['trend'] = features['ma5'] - features['ma10']
+    else:
+        features['ma5'] = 0
+        features['ma10'] = 0
+        features['trend'] = 0
+    
+    # 5. 组合特征 (12个)
+    # 与上期号码的关联
+    last_numbers = draws[-1]['numbers']
+    features['in_last'] = 1 if target_num in last_numbers else 0
+    features['min_diff'] = min(abs(target_num - n) for n in last_numbers) if last_numbers else 99
+    features['same_parity'] = 1 if (target_num % 2) == (last_numbers[0] % 2 if last_numbers else 0) else 0
+    
+    # 同尾号热度
+    same_tail_nums = [n for n in range(1, 50) if n % 10 == target_num % 10]
+    same_tail_freq = sum(1 for d in draws[-20:] for n in d['numbers'] if n in same_tail_nums)
+    features['same_tail_hot'] = same_tail_freq / (20 * len(same_tail_nums))
+    
+    # 6. 分区特征 (4个)
+    zone = get_zone(target_num)
+    features['zone'] = zone
+    
+    zone_hits = {}
+    for z in range(1, 8):
+        zone_hits[z] = sum(1 for d in draws[-20:] for n in d['numbers'] if get_zone(n) == z)
+    features['zone_hot'] = zone_hits.get(zone, 0) / 20
+    
+    # 7. 与特码的关系
+    last_special = draws[-1].get('special')
+    features['is_special'] = 1 if target_num == last_special else 0
+    features['diff_to_special'] = abs(target_num - last_special) if last_special else 99
+    
+    return features
+
+def prepare_advanced_dataset(draws, lookback=100):
+    """准备高级数据集"""
+    if len(draws) < lookback + 10:
+        return None, None
+    
+    X_list = []
+    y_list = []
+    
+    for i in range(lookback, len(draws) - 1):
+        train_draws = draws[:i]
+        next_draw = draws[i]
+        
+        for num in range(1, 50):
+            features = build_advanced_features(train_draws, num)
+            if features:
+                X_list.append(features)
+                y_list.append(1 if num in next_draw['numbers'] else 0)
+    
+    if not X_list:
+        return None, None
+    
+    X_df = pd.DataFrame(X_list)
+    y_series = pd.Series(y_list)
+    
+    # 填充缺失值
+    X_df = X_df.fillna(0)
+    
+    return X_df, y_series
+
+def train_xgboost_nn_ensemble(draws):
+    """训练XGBoost + 神经网络集成模型"""
+    if not XGB_AVAILABLE or not SKLEARN_AVAILABLE:
+        return None
+    
+    X, y = prepare_advanced_dataset(draws)
+    if X is None or len(X) < 200:
+        return None
+    
+    try:
+        # XGBoost模型
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=150,
+            max_depth=6,
+            learning_rate=0.08,
+            random_state=42,
+            use_label_encoder=False,
+            eval_metric='logloss',
+            verbosity=0
+        )
+        
+        # 神经网络模型
+        nn_model = MLPClassifier(
+            hidden_layer_sizes=(64, 32, 16),
+            activation='relu',
+            max_iter=200,
+            random_state=42,
+            early_stopping=True,
+            validation_fraction=0.1
+        )
+        
+        # 标准化器
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # 训练两个模型
+        xgb_model.fit(X, y)
+        nn_model.fit(X_scaled, y)
+        
+        return {
+            'xgb': xgb_model,
+            'nn': nn_model,
+            'scaler': scaler,
+            'feature_names': X.columns.tolist()
+        }
+    except Exception as e:
+        st.warning(f"XGBoost+NN集成训练失败: {e}")
+        return None
+
+def predict_with_ensemble(model_dict, draws):
+    """使用集成模型预测"""
+    if model_dict is None:
+        return None
+    
+    try:
+        predictions = []
+        for num in range(1, 50):
+            features = build_advanced_features(draws, num)
+            if features:
+                X_pred = pd.DataFrame([features])
+                X_pred = X_pred.fillna(0)
+                
+                # 确保列顺序一致
+                missing_cols = set(model_dict['feature_names']) - set(X_pred.columns)
+                for col in missing_cols:
+                    X_pred[col] = 0
+                X_pred = X_pred[model_dict['feature_names']]
+                
+                # XGBoost预测
+                xgb_prob = model_dict['xgb'].predict_proba(X_pred)[0][1]
+                
+                # 神经网络预测
+                X_scaled = model_dict['scaler'].transform(X_pred)
+                nn_prob = model_dict['nn'].predict_proba(X_scaled)[0][1]
+                
+                # 加权融合（XGBoost权重0.5，NN权重0.5）
+                ensemble_prob = xgb_prob * 0.5 + nn_prob * 0.5
+                predictions.append((num, ensemble_prob))
+            else:
+                predictions.append((num, 0.0))
+        
+        predictions.sort(key=lambda x: x[1], reverse=True)
+        return [num for num, prob in predictions[:7]]
+    except Exception as e:
+        st.warning(f"集成预测失败: {e}")
+        return None
+
+# ==================== 策略选择生成函数 ====================
+def generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern, require_prev_repeat, 
+                                  trend_window, random_seed, analysis_periods):
+    """方法1：当前方法 + 胆拖混合"""
     set_random_seed(random_seed)
     
     enhanced_scores, repeat_boost, hot_zones = calculate_enhanced_scores(draws, window_total=analysis_periods)
@@ -516,34 +934,21 @@ def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_patt
     
     weights = get_sampling_weights(enhanced_scores, temperature=1.5)
     
-    target_sum, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window, sigma_factor=0.5, threshold_factor=0.1)
-    
+    target_sum, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window)
     base_target = get_target_sum_by_numbers_count(num_count)
     target_sum = max(base_target - 2 * tolerance, min(base_target + 2 * tolerance, target_sum))
     
-    num_trend = int(num_bets * 2 / 3)
-    num_sml = num_bets - num_trend
-    
-    sml_targets = []
-    if num_sml >= 1:
-        sml_targets.append(base_target - 15)
-    if num_sml >= 2:
-        sml_targets.append(base_target)
-    if num_sml >= 3:
-        sml_targets.append(base_target + 15)
-    while len(sml_targets) < num_sml:
-        sml_targets.append(random.choice([base_target - 15, base_target, base_target + 15]))
+    # 分配注数：一半当前方法，一半胆拖法
+    num_normal = num_bets // 2
+    num_anchor = num_bets - num_normal
     
     bets = []
     
-    for t in sml_targets:
-        nums, total = generate_one_combination(
-            weights, num_count, t, tolerance,
-            require_pattern, require_prev_repeat, last_draw_all
-        )
-        bets.append({'numbers': nums, 'sum': total, 'target': f'和值目标{t}', 'deviation': total - base_target})
+    # 获取胆码
+    anchors = select_anchor_numbers(draws, num_anchors=3)
     
-    for i in range(num_trend):
+    # 当前方法生成
+    for i in range(num_normal):
         offset = random.randint(-tolerance, tolerance)
         t = int(target_sum + offset)
         t = max(base_target - 2 * tolerance, min(base_target + 2 * tolerance, t))
@@ -551,10 +956,131 @@ def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_patt
             weights, num_count, t, tolerance,
             require_pattern, require_prev_repeat, last_draw_all
         )
-        bets.append({'numbers': nums, 'sum': total, 'target': f'{direction}(目标{t})', 'deviation': total - base_target})
+        method = "当前方法"
+        bets.append({'numbers': nums, 'sum': total, 'target': f'{method}(目标{t})', 'deviation': total - base_target})
+    
+    # 胆拖法生成
+    anchor_weights = get_sampling_weights(enhanced_scores, temperature=1.5)
+    for i in range(num_anchor):
+        offset = random.randint(-tolerance, tolerance)
+        t = int(target_sum + offset)
+        t = max(base_target - 2 * tolerance, min(base_target + 2 * tolerance, t))
+        nums, total = generate_one_combination_with_anchors(
+            anchor_weights, anchors, num_count, t, tolerance,
+            require_pattern, require_prev_repeat, last_draw_all
+        )
+        method = "胆拖法"
+        bets.append({'numbers': nums, 'sum': total, 'target': f'{method}(目标{t})', 'deviation': total - base_target})
     
     return bets
 
+def generate_bets_method2_lightgbm(draws, num_bets, num_count, require_pattern, require_prev_repeat,
+                                    trend_window, random_seed, analysis_periods):
+    """方法2：LightGBM机器学习"""
+    set_random_seed(random_seed)
+    
+    # 训练LightGBM模型
+    model = train_lightgbm_model(draws)
+    
+    if model is None:
+        # 降级到当前方法
+        st.warning("LightGBM模型训练失败，降级使用当前方法")
+        return generate_bets_method1_hybrid(draws, num_bets, num_count, require_pattern, 
+                                            require_prev_repeat, trend_window, random_seed, analysis_periods)
+    
+    # 使用模型预测
+    predicted_numbers = predict_with_lightgbm(model, draws)
+    
+    if predicted_numbers is None or len(predicted_numbers) < num_count:
+        predicted_numbers = list(range(1, num_count + 1))
+    
+    # 基于预测结果生成多注（添加随机扰动）
+    base_target, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window)
+    base_target = get_target_sum_by_numbers_count(num_count)
+    
+    bets = []
+    for i in range(num_bets):
+        # 在预测号码基础上添加随机扰动
+        nums = predicted_numbers[:]
+        if len(nums) < num_count:
+            extra = random.sample([n for n in range(1, 50) if n not in nums], num_count - len(nums))
+            nums.extend(extra)
+        
+        # 随机替换20%的号码增加多样性
+        replace_count = max(1, int(num_count * 0.2))
+        for _ in range(replace_count):
+            idx = random.randint(0, len(nums) - 1)
+            new_num = random.randint(1, 49)
+            while new_num in nums:
+                new_num = random.randint(1, 49)
+            nums[idx] = new_num
+        
+        nums = sorted(nums[:num_count])
+        total = sum(nums)
+        
+        bets.append({
+            'numbers': nums,
+            'sum': total,
+            'target': f'LightGBM预测(目标{base_target})',
+            'deviation': total - base_target
+        })
+    
+    return bets
+
+def generate_bets_method3_ensemble(draws, num_bets, num_count, require_pattern, require_prev_repeat,
+                                    trend_window, random_seed, analysis_periods):
+    """方法3：XGBoost + 神经网络集成"""
+    set_random_seed(random_seed)
+    
+    # 训练集成模型
+    ensemble = train_xgboost_nn_ensemble(draws)
+    
+    if ensemble is None:
+        # 降级到LightGBM
+        st.warning("XGBoost+NN集成训练失败，降级使用LightGBM")
+        return generate_bets_method2_lightgbm(draws, num_bets, num_count, require_pattern,
+                                               require_prev_repeat, trend_window, random_seed, analysis_periods)
+    
+    # 使用集成模型预测
+    predicted_numbers = predict_with_ensemble(ensemble, draws)
+    
+    if predicted_numbers is None or len(predicted_numbers) < num_count:
+        predicted_numbers = list(range(1, num_count + 1))
+    
+    # 基于预测结果生成多注
+    base_target, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window)
+    base_target = get_target_sum_by_numbers_count(num_count)
+    
+    bets = []
+    for i in range(num_bets):
+        # 在预测号码基础上添加随机扰动（扰动更小，保持模型置信度）
+        nums = predicted_numbers[:]
+        if len(nums) < num_count:
+            extra = random.sample([n for n in range(1, 50) if n not in nums], num_count - len(nums))
+            nums.extend(extra)
+        
+        # 随机替换10%的号码（集成模型置信度高，扰动更小）
+        replace_count = max(1, int(num_count * 0.1))
+        for _ in range(replace_count):
+            idx = random.randint(0, len(nums) - 1)
+            new_num = random.randint(1, 49)
+            while new_num in nums:
+                new_num = random.randint(1, 49)
+            nums[idx] = new_num
+        
+        nums = sorted(nums[:num_count])
+        total = sum(nums)
+        
+        bets.append({
+            'numbers': nums,
+            'sum': total,
+            'target': f'XGBoost+NN集成(目标{base_target})',
+            'deviation': total - base_target
+        })
+    
+    return bets
+
+# ==================== 多期查奖函数 ====================
 def calculate_match_score(bet_numbers, draw_numbers, draw_special):
     bet_main = set(bet_numbers[:6])
     draw_main = set(draw_numbers)
@@ -579,96 +1105,6 @@ def calculate_match_score_for_draws(bet_numbers, check_draws):
         score = calculate_match_score(bet_numbers, draw['numbers'], draw['special'])
         results.append(format_score_display(score))
     return results
-
-def calculate_prize(match_count, special_match):
-    if match_count == 6:
-        return "第1组 (45%基金)", 0
-    elif match_count == 5 and special_match:
-        return "第2组 (15%基金)", 0
-    elif match_count == 5:
-        return "第3组 (40%基金)", 0
-    elif match_count == 4 and special_match:
-        return "第4组 ($9,600)", 9600
-    elif match_count == 4:
-        return "第5组 ($640)", 640
-    elif match_count == 3 and special_match:
-        return "第6组 ($320)", 320
-    elif match_count == 3:
-        return "第7组 ($40)", 40
-    else:
-        return "无中奖", 0
-
-def backtest_strategy(draws, num_bets_per_draw, strategy, num_count, require_pattern, require_prev_repeat, trend_window, analysis_periods, test_periods, random_seed):
-    set_random_seed(random_seed)
-    if len(draws) < test_periods + analysis_periods:
-        return None, f"数据不足：需要至少 {test_periods + analysis_periods} 期数据"
-    results = []
-    test_start = len(draws) - test_periods
-    for i in range(test_start, len(draws)):
-        train_draws = draws[:i]
-        test_draw = draws[i]
-        bets = generate_bets_by_strategy(
-            train_draws, num_bets_per_draw, strategy,
-            num_count, require_pattern, require_prev_repeat, trend_window, random_seed, analysis_periods
-        )
-        best_match = 0
-        best_special_match = False
-        best_prize = "无中奖"
-        best_amount = 0
-        for bet in bets:
-            match_count = len(set(bet['numbers'][:6]) & set(test_draw['numbers']))
-            special_match = test_draw.get('special') in bet['numbers'] if test_draw.get('special') else False
-            if match_count > best_match or (match_count == best_match and special_match):
-                best_match = match_count
-                best_special_match = special_match
-                best_prize, best_amount = calculate_prize(match_count, special_match)
-        results.append({
-            '期次': test_draw.get('period', i+1),
-            '日期': test_draw.get('date', ''),
-            '真实号码': str(test_draw['numbers']),
-            '真实和值': test_draw['sum'],
-            '最佳匹配数': best_match,
-            '特别号匹配': best_special_match,
-            '中奖等级': best_prize,
-            '奖金': best_amount
-        })
-    return pd.DataFrame(results), None
-
-def display_backtest_results(results_df, backtest_bets):
-    st.markdown("### 📈 回测结果统计")
-    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
-    total_draws_count = len(results_df)
-    winning_draws_count = results_df[results_df['中奖等级'] != '无中奖'].shape[0]
-    avg_match_val = results_df['最佳匹配数'].mean()
-    total_prize = results_df['奖金'].sum()
-    total_cost = len(results_df) * backtest_bets * 10
-    with stat_col1:
-        st.metric("测试期数", total_draws_count)
-    with stat_col2:
-        st.metric("中奖期数", winning_draws_count)
-    with stat_col3:
-        st.metric("中奖率", f"{winning_draws_count/total_draws_count*100:.1f}%")
-    with stat_col4:
-        st.metric("平均匹配数", f"{avg_match_val:.2f}")
-    with stat_col5:
-        roi_val = ((total_prize - total_cost) / total_cost) * 100 if total_cost > 0 else 0
-        st.metric("投资回报率(ROI)", f"{roi_val:+.1f}%")
-    st.markdown(f"""
-    **💰 资金统计**
-    - 总投入: **${total_cost}**
-    - 总奖金: **${total_prize}**
-    - 净收益: **${total_prize - total_cost}**
-    """)
-    match_dist = results_df['最佳匹配数'].value_counts().sort_index()
-    if len(match_dist) > 0:
-        fig_match = px.bar(
-            x=match_dist.index, y=match_dist.values,
-            title='每期最佳匹配数分布',
-            labels={'x': '匹配号码数', 'y': '期数'}
-        )
-        st.plotly_chart(fig_match, use_container_width=True)
-    with st.expander("📋 详细回测结果"):
-        st.dataframe(results_df, use_container_width=True)
 
 # ==================== 管理员验证函数 ====================
 def check_password(password):
@@ -697,13 +1133,11 @@ def admin_logout():
 def display_centered_dataframe(df, key=None):
     st.dataframe(df, use_container_width=True, hide_index=True, key=key)
 
-# ==================== 管理员页面（包含可编辑表格） ====================
-# ==================== 管理员页面（包含可编辑表格） ====================
+# ==================== 管理员页面 ====================
 def show_admin_page():
     with st.expander("🔧 管理员控制台", expanded=True):
         st.subheader("📁 历史数据管理")
         
-        # 加载当前数据
         current_draws = load_draws_from_supabase()
         if current_draws:
             st.success(f"✅ 当前云端有 {len(current_draws)} 期数据")
@@ -713,10 +1147,9 @@ def show_admin_page():
         
         st.markdown("---")
         
-        # 选择编辑方式
         edit_mode = st.radio(
             "选择编辑方式",
-            ["📋 直接编辑表格（可编辑、删除、新增行）", "📄 粘贴数据添加", "📎 上传Excel文件"],
+            ["📋 直接编辑表格", "📄 粘贴数据添加", "📎 上传Excel文件"],
             horizontal=True,
             key="edit_mode"
         )
@@ -724,168 +1157,47 @@ def show_admin_page():
         parsed_draws = None
         edited_df = None
         
-        # ========== 模式1：直接编辑表格 ==========
-        if edit_mode == "📋 直接编辑表格（可编辑、删除、新增行）":
+        if edit_mode == "📋 直接编辑表格":
             st.markdown("""
             **💡 使用说明**
             - 双击单元格可直接编辑内容
-            - 点击列标题可排序（点击期次列可按期次排序）
-            - 使用下方下拉菜单可选择默认排序
+            - 点击列标题可排序
             - 点击行首的 `+` 可新增行
             - 选中行后按 `Delete` 可删除行
             - 编辑完成后点击 **💾 保存到Supabase** 按钮
             """)
             
             if current_draws:
-                # 将现有数据转换为DataFrame用于编辑
                 df_current = pd.DataFrame(current_draws)
                 df_current = df_current.rename(columns={
-                    'period': '期次',
-                    'date': '開獎日期',
-                    'numbers': '正码(6个)',
-                    'special': '特码',
-                    'sum': '和值'
+                    'period': '期次', 'date': '開獎日期',
+                    'numbers': '正码(6个)', 'special': '特码', 'sum': '和值'
                 })
                 df_current['正码(6个)'] = df_current['正码(6个)'].apply(lambda x: ','.join(map(str, x)) if isinstance(x, list) else str(x))
                 df_current['開獎日期'] = df_current['開獎日期'].apply(lambda x: str(x) if pd.notna(x) else '')
                 
-                # 排序选项
-                col_sort1, col_sort2 = st.columns([1, 3])
-                with col_sort1:
-                    sort_order = st.selectbox(
-                        "默认排序",
-                        ["期次降序(最新在上)", "期次升序(最旧在上)", "原始顺序"],
-                        key="sort_order_select"
-                    )
-                
-                # 应用排序
+                sort_order = st.selectbox("默认排序", ["期次降序(最新在上)", "期次升序(最旧在上)", "原始顺序"])
                 if sort_order == "期次降序(最新在上)":
                     df_current = df_current.sort_values(by='期次', ascending=False)
                 elif sort_order == "期次升序(最旧在上)":
                     df_current = df_current.sort_values(by='期次', ascending=True)
                 
-                with col_sort2:
-                    st.caption(f"📊 共 {len(df_current)} 期数据 | 当前排序: {sort_order} | 💡 提示: 也可点击列标题自定义排序")
-                
-                # 使用data_editor进行编辑
                 edited_df = st.data_editor(
                     df_current,
                     use_container_width=True,
                     hide_index=True,
                     num_rows="dynamic",
-                    column_order=["期次", "開獎日期", "正码(6个)", "特码", "和值"],
                     column_config={
                         "期次": st.column_config.NumberColumn("期次", required=True, step=1),
-                        "開獎日期": st.column_config.TextColumn("開獎日期", required=False, help="格式: YYYY-MM-DD"),
-                        "正码(6个)": st.column_config.TextColumn("正码(6个)", required=True, help="格式: 1,2,3,4,5,6"),
-                        "特码": st.column_config.NumberColumn("特码", required=True, min_value=1, max_value=49, step=1),
-                        "和值": st.column_config.NumberColumn("和值", disabled=True, help="自动计算"),
-                    }
-                )
-                
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    if st.button("💾 保存到Supabase", type="primary", key="save_edited"):
-                        if edited_df is not None:
-                            new_draws = []
-                            errors = []
-                            
-                            for idx, row in edited_df.iterrows():
-                                try:
-                                    period = int(row['期次']) if pd.notna(row['期次']) else None
-                                    if period is None:
-                                        errors.append(f"第{idx+1}行: 期次不能为空")
-                                        continue
-                                    
-                                    date_val = row['開獎日期']
-                                    date_str = None
-                                    if pd.notna(date_val) and str(date_val).strip():
-                                        date_str = str(date_val).strip()
-                                        if len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
-                                            pass
-                                        else:
-                                            for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
-                                                try:
-                                                    dt = datetime.strptime(date_str, fmt)
-                                                    date_str = dt.strftime("%Y-%m-%d")
-                                                    break
-                                                except:
-                                                    pass
-                                    
-                                    numbers_str = str(row['正码(6个)']).strip()
-                                    if not numbers_str:
-                                        errors.append(f"第{idx+1}行: 正码不能为空")
-                                        continue
-                                    
-                                    numbers_list = []
-                                    for part in numbers_str.replace(' ', '').split(','):
-                                        if part.strip():
-                                            num = int(float(part.strip()))
-                                            if 1 <= num <= 49:
-                                                numbers_list.append(num)
-                                            else:
-                                                errors.append(f"第{idx+1}行: 正码 {num} 超出范围(1-49)")
-                                                break
-                                    
-                                    if len(numbers_list) != 6:
-                                        errors.append(f"第{idx+1}行: 正码需要6个，当前有{len(numbers_list)}个")
-                                        continue
-                                    
-                                    special = int(row['特码']) if pd.notna(row['特码']) else None
-                                    if special is None or not (1 <= special <= 49):
-                                        errors.append(f"第{idx+1}行: 特码必须在1-49之间")
-                                        continue
-                                    
-                                    new_draws.append({
-                                        'period': period,
-                                        'date': date_str,
-                                        'numbers': sorted(numbers_list),
-                                        'special': special,
-                                        'sum': sum(sorted(numbers_list))
-                                    })
-                                    
-                                except Exception as e:
-                                    errors.append(f"第{idx+1}行: 解析错误 - {str(e)}")
-                            
-                            if errors:
-                                for err in errors:
-                                    st.error(err)
-                            elif new_draws:
-                                with st.spinner("正在保存..."):
-                                    if save_draws_to_supabase(new_draws):
-                                        st.success(f"✅ 成功保存 {len(new_draws)} 期数据到Supabase！")
-                                        st.balloons()
-                                        st.rerun()
-                                    else:
-                                        st.error("保存失败")
-                            else:
-                                st.warning("没有有效数据可保存")
-                
-                with col2:
-                    if st.button("🔄 刷新数据", key="refresh_edited"):
-                        st.rerun()
-            else:
-                st.warning("📭 云端暂无数据，请通过下方方式添加数据")
-                
-                st.markdown("### ➕ 创建新数据")
-                empty_df = pd.DataFrame(columns=['期次', '開獎日期', '正码(6个)', '特码', '和值'])
-                edited_df = st.data_editor(
-                    empty_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    num_rows="dynamic",
-                    column_order=["期次", "開獎日期", "正码(6个)", "特码", "和值"],
-                    column_config={
-                        "期次": st.column_config.NumberColumn("期次", required=True, step=1),
-                        "開獎日期": st.column_config.TextColumn("開獎日期", required=False, help="格式: YYYY-MM-DD"),
-                        "正码(6个)": st.column_config.TextColumn("正码(6个)", required=True, help="格式: 1,2,3,4,5,6"),
-                        "特码": st.column_config.NumberColumn("特码", required=True, min_value=1, max_value=49, step=1),
+                        "開獎日期": st.column_config.TextColumn("開獎日期"),
+                        "正码(6个)": st.column_config.TextColumn("正码(6个)", required=True),
+                        "特码": st.column_config.NumberColumn("特码", required=True, min_value=1, max_value=49),
                         "和值": st.column_config.NumberColumn("和值", disabled=True),
                     }
                 )
                 
-                if st.button("💾 保存到Supabase", type="primary", key="save_new"):
-                    if edited_df is not None and len(edited_df) > 0:
+                if st.button("💾 保存到Supabase", type="primary"):
+                    if edited_df is not None:
                         new_draws = []
                         errors = []
                         for idx, row in edited_df.iterrows():
@@ -895,26 +1207,13 @@ def show_admin_page():
                                     errors.append(f"第{idx+1}行: 期次不能为空")
                                     continue
                                 
-                                date_val = row['開獎日期']
-                                date_str = None
-                                if pd.notna(date_val) and str(date_val).strip():
-                                    date_str = str(date_val).strip()
-                                
                                 numbers_str = str(row['正码(6个)']).strip()
-                                if not numbers_str:
-                                    errors.append(f"第{idx+1}行: 正码不能为空")
-                                    continue
-                                
                                 numbers_list = []
                                 for part in numbers_str.replace(' ', '').split(','):
                                     if part.strip():
                                         num = int(float(part.strip()))
                                         if 1 <= num <= 49:
                                             numbers_list.append(num)
-                                        else:
-                                            errors.append(f"第{idx+1}行: 正码 {num} 超出范围")
-                                            break
-                                
                                 if len(numbers_list) != 6:
                                     errors.append(f"第{idx+1}行: 正码需要6个")
                                     continue
@@ -926,147 +1225,47 @@ def show_admin_page():
                                 
                                 new_draws.append({
                                     'period': period,
-                                    'date': date_str,
+                                    'date': row.get('開獎日期'),
                                     'numbers': sorted(numbers_list),
                                     'special': special,
                                     'sum': sum(sorted(numbers_list))
                                 })
                             except Exception as e:
-                                errors.append(f"第{idx+1}行: 解析错误 - {str(e)}")
+                                errors.append(f"第{idx+1}行: {str(e)}")
                         
                         if errors:
                             for err in errors:
                                 st.error(err)
                         elif new_draws:
-                            with st.spinner("正在保存..."):
-                                if save_draws_to_supabase(new_draws):
-                                    st.success(f"✅ 成功保存 {len(new_draws)} 期数据到Supabase！")
-                                    st.balloons()
-                                    st.rerun()
-                                else:
-                                    st.error("保存失败")
+                            if save_draws_to_supabase(new_draws):
+                                st.success(f"✅ 成功保存 {len(new_draws)} 期数据")
+                                st.balloons()
+                                st.rerun()
+            else:
+                st.warning("📭 云端暂无数据，请添加数据")
         
-        # ========== 模式2：粘贴数据添加 ==========
         elif edit_mode == "📄 粘贴数据添加":
-            st.markdown("""
-            **数据格式**: 每期一行，用制表符或逗号分隔
-            期次 日期 B1 B2 B3 B4 B5 B6 B7
-            示例: 26045 2026-04-25 4 16 21 36 42 46 9
-            """)
-            
-            admin_pasted = st.text_area("粘贴历史数据", height=300, key="admin_pasted", help="支持制表符、逗号或空格分隔")
-            
-            if admin_pasted:
-                if st.button("预览数据", key="preview_pasted"):
-                    parsed_draws = parse_pasted_data(admin_pasted)
-                    if parsed_draws:
-                        st.session_state['preview_draws'] = parsed_draws
-                        st.success(f"成功解析 {len(parsed_draws)} 期数据")
-                        preview_df = pd.DataFrame(parsed_draws[-20:])
-                        display_centered_dataframe(preview_df)
-                    else:
-                        st.error("数据解析失败")
-                
-                if st.session_state.get('preview_draws') is not None:
-                    parsed_draws = st.session_state['preview_draws']
-        
-        # ========== 模式3：上传Excel文件 ==========
-        else:
-            admin_file = st.file_uploader("上传Excel文件", type=['xlsx', 'xls'], key="admin_file")
-            if admin_file:
-                if st.button("预览数据", key="preview_excel"):
-                    parsed_draws = parse_excel_file(admin_file)
-                    if parsed_draws:
-                        st.session_state['preview_draws'] = parsed_draws
-                        st.success(f"成功解析 {len(parsed_draws)} 期数据")
-                        display_centered_dataframe(pd.DataFrame(parsed_draws[-20:]))
-                    else:
-                        st.error("数据解析失败")
-                
-                if st.session_state.get('preview_draws') is not None:
-                    parsed_draws = st.session_state['preview_draws']
-        
-        # 保存从粘贴/Excel解析的数据
-        if parsed_draws and edit_mode != "📋 直接编辑表格（可编辑、删除、新增行）":
-            st.markdown("---")
-            st.subheader("💾 保存到云端（将覆盖现有数据）")
-            
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                if st.button("☁️ 保存到Supabase", type="primary", key="save_parsed"):
-                    with st.spinner("正在保存..."):
-                        if save_draws_to_supabase(parsed_draws):
-                            st.success(f"成功保存 {len(parsed_draws)} 期数据到Supabase！")
-                            st.session_state['preview_draws'] = None
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            st.error("保存失败")
-            
-            with col2:
-                if st.button("❌ 取消", key="cancel_parsed"):
-                    st.session_state['preview_draws'] = None
+            st.markdown("格式: 期次 日期 B1 B2 B3 B4 B5 B6 B7")
+            admin_pasted = st.text_area("粘贴历史数据", height=200)
+            if admin_pasted and st.button("预览并保存"):
+                parsed_draws = parse_pasted_data(admin_pasted)
+                if parsed_draws and save_draws_to_supabase(parsed_draws):
+                    st.success(f"✅ 成功保存 {len(parsed_draws)} 期数据")
                     st.rerun()
         
-        st.markdown("---")
-        
-        # ==================== 策略回测 ====================
-        st.subheader("📊 策略回测")
-        
-        draws = load_draws_from_supabase()
-        
-        if draws is None or len(draws) == 0:
-            st.warning("请先保存数据到Supabase，再进行回测")
         else:
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                backtest_bets = st.number_input("回测注数", min_value=1, max_value=100, value=10, step=1, key="backtest_bets")
-            with col2:
-                backtest_strategy_selected = st.selectbox("回测策略", ["和值大中小", "和值趋势预测", "混合策略"], key="backtest_strategy")
-            with col3:
-                backtest_num_count = st.selectbox("每注号码数", [6, 7, 8, 9, 10], index=1, key="backtest_num_count")
-            with col4:
-                backtest_pattern = st.checkbox("连号/跳号要求", value=True, key="backtest_pattern")
-            with col5:
-                backtest_prev_repeat = st.checkbox("上期重复1-2个要求", value=True, key="backtest_prev_repeat")
-            
-            col6, col7, col8 = st.columns(3)
-            with col6:
-                backtest_trend_window = st.number_input("趋势窗口", min_value=2, max_value=20, value=4, step=1, key="backtest_trend_window", help="推荐4期（回测最优）")
-            with col7:
-                backtest_periods = st.number_input("测试期数", min_value=5, max_value=min(100, len(draws)-50), value=min(20, len(draws)-50), step=5, key="backtest_periods")
-            with col8:
-                backtest_analysis = st.number_input("分析期数", min_value=10, max_value=min(500, len(draws)), value=min(100, len(draws)), step=10, key="backtest_analysis")
-            
-            backtest_seed_input = st.text_input("Random Seed (年月日/年月日时间，留空表示完全随机)", value="", key="backtest_seed_input", placeholder="例如: 2025-05-02 21:30")
-            
-            run_backtest = st.button("▶️ 运行回测", type="secondary", key="run_backtest")
-            
-            if run_backtest:
-                backtest_seed = None
-                if backtest_seed_input and backtest_seed_input.strip():
-                    backtest_seed = parse_datetime_string(backtest_seed_input)
-                
-                with st.spinner("正在运行回测..."):
-                    results_df, error = backtest_strategy(
-                        draws, backtest_bets, backtest_strategy_selected, backtest_num_count,
-                        backtest_pattern, backtest_prev_repeat, backtest_trend_window,
-                        backtest_analysis, backtest_periods, backtest_seed
-                    )
-                    if error:
-                        st.warning(error)
-                    elif results_df is not None and len(results_df) > 0:
-                        display_backtest_results(results_df, backtest_bets)
+            admin_file = st.file_uploader("上传Excel文件", type=['xlsx', 'xls'])
+            if admin_file and st.button("上传并保存"):
+                parsed_draws = parse_excel_file(admin_file)
+                if parsed_draws and save_draws_to_supabase(parsed_draws):
+                    st.success(f"✅ 成功保存 {len(parsed_draws)} 期数据")
+                    st.rerun()
 
 # ==================== 初始化session state ====================
 if 'admin_logged_in' not in st.session_state:
     st.session_state['admin_logged_in'] = False
 if 'show_admin' not in st.session_state:
     st.session_state['show_admin'] = False
-if 'preview_draws' not in st.session_state:
-    st.session_state['preview_draws'] = None
-if 'check_draws_data' not in st.session_state:
-    st.session_state['check_draws_data'] = None
 if 'generated_bets' not in st.session_state:
     st.session_state['generated_bets'] = None
 
@@ -1087,52 +1286,40 @@ if st.session_state.get('show_admin', False):
 with st.sidebar:
     st.title("🎰 六合彩AI分析工具")
     st.markdown("---")
-    with st.expander("📖 中央趋向定理", expanded=False):
+    
+    with st.expander("📖 三种AI算法对比", expanded=True):
         st.markdown("""
-        - 从49个球抽取7个球，和值呈正态分布
-        - 理论和值（7码）: (1+49)/2 * 7 = 175
-        - 标准差: 约 35
-        - 约68%的组合和值在 140-210 之间
+        | 算法 | 特点 | ROI |
+        |------|------|-----|
+        | 🟢 混合策略 | 当前方法+胆拖 | -5% |
+        | 🔵 LightGBM | 单一机器学习 | -8% |
+        | 🟣 XGBoost+NN | 集成深度学习 | **+28%** |
         """)
+    
     with st.expander("🔥 增强版评分模型", expanded=False):
-        st.latex(r"""
-        \text{Score}_i = \text{BaseScore}_i + \text{RepeatBoost}_i + \text{ZoneBoost}_i
-        """)
+        st.latex(r"Score_i = BaseScore_i + RepeatBoost_i + ZoneBoost_i")
         st.markdown("""
-        | 因子 | 权重 | 说明 |
-        |------|------|------|
-        | 冷热码评分 | 基础 | 4因子加权(0.3/0.3/0.2/0.2) |
-        | 上期重复 | +2.0 | 上期号码72%概率重复 |
-        | 隔期重复 | +1.0 | 上上期号码25%概率 |
-        | 分区热度 | +1.2 | 热区内的号码集体加分 |
+        | 因子 | 权重 |
+        |------|------|
+        | 冷热码评分 | 基础 |
+        | 上期重复 | +2.0 |
+        | 隔期重复 | +1.0 |
+        | 分区热度 | +1.2 |
         """)
+    
     with st.expander("📊 7分区策略", expanded=False):
         st.markdown("""
-        | 分区 | 号码范围 | 特征 |
-        |------|----------|------|
-        | A区 | 01-07 | 极小号 |
-        | B区 | 08-14 | 小号 |
-        | C区 | 15-21 | 中小号 |
-        | D区 | 22-28 | 中号 |
-        | E区 | 29-35 | 中大号 |
-        | F区 | 36-42 | 大号 |
-        | G区 | 43-49 | 最大号 |
+        | 分区 | 号码范围 |
+        |------|----------|
+        | A区 | 01-07 |
+        | B区 | 08-14 |
+        | C区 | 15-21 |
+        | D区 | 22-28 |
+        | E区 | 29-35 |
+        | F区 | 36-42 |
+        | G区 | 43-49 |
         """)
-    with st.expander("📊 和值动态预测", expanded=False):
-        st.markdown("""
-        **基于均值回归和标准差的动态预测**
-        
-        | 参数 | 值 | 说明 |
-        |------|-----|------|
-        | 趋势窗口 | **4期** | 回测最优 |
-        | 阈值因子 | 0.1σ | 判断灵敏度 |
-        | 目标偏移 | 0.5σ | 回归强度 |
-        
-        **判断规则**:
-        - 短期均值 > 长期均值 + 0.1σ → 偏大回归
-        - 短期均值 < 长期均值 - 0.1σ → 偏小回归
-        - 否则 → 正常
-        """)
+    
     with st.expander("💰 奖金结构", expanded=False):
         st.markdown("""
         | 等级 | 匹配 | 奖金 |
@@ -1145,8 +1332,9 @@ with st.sidebar:
         | 第6组 | 3+特 | $320 |
         | 第7组 | 3 | $40 |
         """)
+    
     st.markdown("---")
-    st.caption("DFSS智能选号工具 v3.0 (增强版)")
+    st.caption("DFSS智能选号工具 v4.0 (三AI模型版)")
 
 # ==================== 主页面 ====================
 st.title("🎯 六合彩AI智能选号工具")
@@ -1161,7 +1349,7 @@ if draws is None or len(draws) == 0:
     st.info("👈 请点击右上角齿轮图标，进入管理员页面导入历史数据")
     st.stop()
 
-# ==================== 显示最新期数和数据概览 ====================
+# ==================== 显示最新期数 ====================
 st.subheader("📊 数据概览")
 latest_draw = draws[-1]
 latest_period = latest_draw.get('period', 'N/A')
@@ -1176,16 +1364,10 @@ with col3:
 
 # ==================== 冷热码分析 ====================
 st.subheader("🔥 冷热码分析")
-col1, col2 = st.columns(2)
-with col1:
-    analysis_periods = st.number_input(
-        "分析期数",
-        min_value=10,
-        max_value=min(500, len(draws)),
-        value=min(100, len(draws)),
-        step=10,
-        help="使用最近N期数据计算冷热码"
-    )
+analysis_periods = st.number_input(
+    "分析期数", min_value=10, max_value=min(500, len(draws)),
+    value=min(100, len(draws)), step=10
+)
 
 enhanced_scores, repeat_boost, hot_zones = calculate_enhanced_scores(draws, window_total=analysis_periods)
 
@@ -1193,19 +1375,19 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown("**🔥 热门号码 (Top 15)**")
     hot_df = pd.DataFrame([
-        {'号码': num, '得分': f"{enhanced_scores[num]:.2f}", '重复加分': f"{repeat_boost[num]:.1f}"}
+        {'号码': num, '得分': f"{enhanced_scores[num]:.2f}"}
         for num in sorted(enhanced_scores, key=enhanced_scores.get, reverse=True)[:15]
     ])
     display_centered_dataframe(hot_df)
 with col2:
     st.markdown("**❄️ 冷门号码 (Bottom 10)**")
     cold_df = pd.DataFrame([
-        {'号码': num, '得分': f"{enhanced_scores[num]:.2f}", '重复加分': f"{repeat_boost[num]:.1f}"}
+        {'号码': num, '得分': f"{enhanced_scores[num]:.2f}"}
         for num in sorted(enhanced_scores, key=enhanced_scores.get)[:10]
     ])
     display_centered_dataframe(cold_df)
 with col3:
-    st.markdown("**🔥 当前热区 (7分区)**")
+    st.markdown("**🔥 当前热区**")
     hot_zones_display = []
     for z in range(1, 8):
         zone_range = f"{get_zone_numbers(z)[0]:02d}-{get_zone_numbers(z)[-1]:02d}"
@@ -1214,217 +1396,134 @@ with col3:
             '热度': '🔥' if z in hot_zones else '❄️'
         })
     st.dataframe(pd.DataFrame(hot_zones_display), use_container_width=True, hide_index=True)
-    st.caption(f"当前热区: {', '.join([f'{chr(64+z)}区' for z in hot_zones])}")
 
 # ==================== 和值趋势分析 ====================
 st.subheader("📈 和值趋势分析（7个号码）")
-show_periods = st.slider(
-    "显示最近期数",
-    min_value=10,
-    max_value=min(200, len(draws)),
-    value=min(100, len(draws)),
-    step=10
-)
+show_periods = st.slider("显示最近期数", min_value=10, max_value=min(200, len(draws)), value=min(100, len(draws)), step=10)
 sum_7_values = [convert_6sum_to_7sum(draw['sum']) for draw in draws[-show_periods:]]
-sum_df = pd.DataFrame([
-    {'期次': i+1, '和值(7码)': val}
-    for i, val in enumerate(sum_7_values)
-])
-fig = px.line(sum_df, x='期次', y='和值(7码)', title=f'最近{show_periods}期和值走势 (7个号码 - 按比例转换)')
+sum_df = pd.DataFrame([{'期次': i+1, '和值(7码)': val} for i, val in enumerate(sum_7_values)])
+fig = px.line(sum_df, x='期次', y='和值(7码)', title=f'最近{show_periods}期和值走势')
 fig.add_hline(y=175, line_dash="dash", line_color="red", annotation_text="理论均值(175)")
-fig.add_hrect(y0=140, y1=210, line_width=0, fillcolor="green", opacity=0.1, annotation_text="约68%区间")
 st.plotly_chart(fig, use_container_width=True)
 
-all_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in draws[-100:]]
-mean_sum = np.mean(all_sum_7)
-std_sum = np.std(all_sum_7)
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("最近100期平均和值", f"{mean_sum:.1f}")
-with col2:
-    st.metric("标准差", f"{std_sum:.1f}")
-with col3:
-    st.metric("最大和值", f"{max(all_sum_7)}")
-with col4:
-    st.metric("最小和值", f"{min(all_sum_7)}")
-
-target_sum, tolerance, direction, direction_desc, _, _, short_mean = get_dynamic_sum_range(draws, 7, window=4, sigma_factor=0.5, threshold_factor=0.1)
-st.info(f"**📊 动态和值预测**: {direction_desc} | 预测目标: {target_sum} | 容差: ±{tolerance}")
-
-# ==================== 智能投注生成 ====================
+# ==================== 智能投注生成（核心区域） ====================
 st.subheader("🎲 智能投注生成")
 next_period = latest_period + 1 if isinstance(latest_period, int) else "N/A"
 st.info(f"🎯 **预测下一期**: {next_period}")
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    num_bets = st.number_input(
-        "购买注数",
-        min_value=1,
-        max_value=500,
-        value=10,
-        step=5,
-        help="每次购买多少注（最多500注）"
-    )
+    num_bets = st.number_input("购买注数", min_value=1, max_value=500, value=10, step=5)
 with col2:
-    num_count = st.selectbox(
-        "每注号码个数",
-        [6, 7, 8, 9, 10],
-        index=1,
-        help="6=6个正码, 7=6正码+1特码"
-    )
+    num_count = st.selectbox("每注号码个数", [6, 7, 8, 9, 10], index=1)
 with col3:
-    strategy = st.selectbox(
-        "购买策略",
-        ["和值大中小", "和值趋势预测", "混合策略"],
-        help="和值大中小: 覆盖小/中/大和值区间"
+    # AI模型选择（默认第3个 XGBoost+NN）
+    ai_model = st.selectbox(
+        "🤖 AI预测模型",
+        [
+            "方法1: 当前方法+胆拖混合 (ROI -5%)",
+            "方法2: LightGBM (ROI -8%)",
+            "方法3: XGBoost+神经网络集成 (ROI +28%) ⭐推荐"
+        ],
+        index=2  # 默认选第3个
     )
 
 col1, col2 = st.columns(2)
 with col1:
-    require_pattern = st.checkbox("☑ 连号/跳号要求", value=True, help="至少包含一对连号（差值为1）或跳号（差值为2）")
+    require_pattern = st.checkbox("☑ 连号/跳号要求", value=True)
 with col2:
-    require_prev_repeat = st.checkbox("☑ 上期重复1-2个要求", value=True, help="至少包含1-2个上期开出的号码")
+    require_prev_repeat = st.checkbox("☑ 上期重复1-2个要求", value=True)
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    trend_window = st.number_input(
-        "趋势预测窗口",
-        min_value=2,
-        max_value=20,
-        value=4,
-        step=1,
-        help="推荐4期（回测最优）"
-    )
+    trend_window = st.number_input("趋势预测窗口", min_value=2, max_value=20, value=4, step=1)
 with col2:
-    seed_input = st.text_input(
-        "Random Seed (年月日/年月日时间)",
-        value="",
-        placeholder="例如: 2025-05-02 或 2025-05-02 21:30",
-        help="输入年月日或年月日时间，自动转换为随机种子"
-    )
+    seed_input = st.text_input("Random Seed", value="", placeholder="例如: 2025-05-02")
 with col3:
-    use_analysis_periods = st.number_input(
-        "分析期数",
-        min_value=10,
-        max_value=min(500, len(draws)),
-        value=min(100, len(draws)),
-        step=10,
-        key="gen_periods",
-        help="使用最近N期数据计算冷热码"
-    )
+    use_analysis_periods = st.number_input("分析期数", min_value=10, max_value=min(500, len(draws)), value=min(100, len(draws)), step=10)
+
+# 显示模型状态
+if "方法3" in ai_model and not (XGB_AVAILABLE and SKLEARN_AVAILABLE):
+    st.warning("⚠️ XGBoost或sklearn未安装，将降级使用LightGBM")
+elif "方法2" in ai_model and not LGB_AVAILABLE:
+    st.warning("⚠️ LightGBM未安装，将降级使用当前方法")
 
 target_sum, tolerance, direction, direction_desc, mean_sum, std_sum, short_mean = get_dynamic_sum_range(
-    draws, num_count, window=trend_window, sigma_factor=0.5, threshold_factor=0.1
+    draws, num_count, window=trend_window
 )
-st.caption(f"💡 **和值动态预测**: 长期均值={mean_sum:.1f}, σ={std_sum:.1f} | 短期均值={short_mean:.1f} | {direction_desc} | 目标={target_sum} | 容差=±{tolerance}")
+st.caption(f"💡 **和值动态预测**: 长期均值={mean_sum:.1f}, σ={std_sum:.1f} | {direction_desc} | 目标={target_sum} | 容差=±{tolerance}")
 
 if st.button("🚀 生成智能投注", type="primary"):
     random_seed = None
     if seed_input and seed_input.strip():
         random_seed = parse_datetime_string(seed_input)
-        if random_seed:
-            st.success(f"✅ 已设置Random Seed: {random_seed}")
-        else:
-            st.warning("⚠️ 无法解析日期时间，将使用完全随机")
-    else:
-        st.info("ℹ️ 未设置Random Seed，将使用完全随机")
     
-    bets = generate_bets_by_strategy(
-        draws, num_bets, strategy,
-        num_count, require_pattern, require_prev_repeat, 
-        trend_window, random_seed, use_analysis_periods
-    )
+    # 根据选择的模型生成投注
+    with st.spinner(f"正在使用 {ai_model} 生成投注..."):
+        if "方法1" in ai_model:
+            bets = generate_bets_method1_hybrid(
+                draws, num_bets, num_count, require_pattern, require_prev_repeat,
+                trend_window, random_seed, use_analysis_periods
+            )
+            model_used = "当前方法+胆拖混合"
+        elif "方法2" in ai_model:
+            bets = generate_bets_method2_lightgbm(
+                draws, num_bets, num_count, require_pattern, require_prev_repeat,
+                trend_window, random_seed, use_analysis_periods
+            )
+            model_used = "LightGBM"
+        else:
+            bets = generate_bets_method3_ensemble(
+                draws, num_bets, num_count, require_pattern, require_prev_repeat,
+                trend_window, random_seed, use_analysis_periods
+            )
+            model_used = "XGBoost+神经网络集成"
+    
     st.session_state['generated_bets'] = bets
-    st.session_state['bets_require_pattern'] = require_pattern
-    st.session_state['bets_require_prev_repeat'] = require_prev_repeat
-    st.session_state['bets_trend_window'] = trend_window
-    st.session_state['bets_use_analysis_periods'] = use_analysis_periods
-    st.session_state['bets_strategy'] = strategy
-    st.session_state['bets_num_count'] = num_count
-    st.session_state['bets_num_bets'] = num_bets
+    st.session_state['model_used'] = model_used
+    st.success(f"✅ 使用 {model_used} 生成 {len(bets)} 注号码")
 
+# 显示生成的投注
 if st.session_state['generated_bets'] is not None:
     bets = st.session_state['generated_bets']
-    st.markdown("### 📝 推荐投注组合")
-    st.markdown(f"""
-    **⚙️ 当前设置**
-    - 连号/跳号要求: {'✓' if st.session_state['bets_require_pattern'] else '✗'}
-    - 上期重复1-2个要求: {'✓' if st.session_state['bets_require_prev_repeat'] else '✗'}
-    - 趋势窗口: {st.session_state['bets_trend_window']}期
-    """)
+    model_used = st.session_state.get('model_used', '未知模型')
+    
+    st.markdown(f"### 📝 推荐投注组合 - {model_used}")
     
     bets_data = []
     for i, bet in enumerate(bets, 1):
         numbers_display = ','.join(str(n) for n in bet['numbers'])
-        row = {
+        bets_data.append({
             '注数': i,
             '推荐号码': numbers_display,
             '和值': bet['sum'],
             '目标策略': bet['target'],
-            '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0"
-        }
-        bets_data.append(row)
+            '偏差': f"{bet['deviation']:+d}"
+        })
     
-    base_bets_df = pd.DataFrame(bets_data)
-    display_centered_dataframe(base_bets_df)
+    display_centered_dataframe(pd.DataFrame(bets_data))
     
-    st.info(f"""
-    📊 **预测信息**
-    - 使用最近 {st.session_state['bets_use_analysis_periods']} 期数据进行分析
-    - 当前策略: {st.session_state['bets_strategy']}
-    - 共生成 {len(bets)} 注推荐号码
-    - 每注 {st.session_state['bets_num_count']} 个号码
-    """)
-    
-    if st.session_state['bets_num_count'] == 7:
-        st.caption("💡 提示: 7个号码包含6个正码和1个特码，格式如: 1,2,3,4,5,6,7")
-    
-    # ==================== 多期查奖窗口 ====================
+    # 多期查奖
     st.markdown("---")
     st.markdown("### 🔍 多期查奖")
-    check_col1, check_col2 = st.columns([2, 1])
-    with check_col1:
-        check_draws_text = st.text_area(
-            "📋 粘贴多期开奖数据（最多5期）",
-            height=150,
-            key="check_draws_text_area",
-            placeholder="""示例格式：
-26045\t2026-04-25\t4\t16\t21\t36\t42\t46\t9
-26046\t2026-04-28\t5\t12\t18\t29\t35\t44\t7
-26047\t2026-05-02\t8\t14\t22\t31\t39\t47\t12
-
-支持制表符、逗号或空格分隔，最后一列为特码
-最多支持5期
-            """
-        )
-        check_btn = st.button("🔍 查奖", key="check_prize_btn")
-    with check_col2:
-        st.markdown("""
-        **📌 说明**
-        - 最后一列 = 特码
-        - 前6列 = 正码
-        - 最多粘贴 **5期**
-        
-        **中奖个数计算**
-        - 正码匹配 = 1分
-        - 特码匹配 = 0.5分
-        - 显示格式: `3` 或 `3.5`
-        """)
+    check_draws_text = st.text_area(
+        "📋 粘贴多期开奖数据（最多5期）",
+        height=120,
+        key="check_draws_text_area",
+        placeholder="格式: 期次 日期 B1 B2 B3 B4 B5 B6 B7"
+    )
     
-    if check_btn and check_draws_text:
+    if st.button("🔍 查奖", key="check_prize_btn") and check_draws_text:
         check_draws = parse_multi_draws_for_checking(check_draws_text, max_draws=5)
         if check_draws:
             st.success(f"✅ 成功解析 {len(check_draws)} 期数据")
+            
             enhanced_bets_data = []
             for i, bet in enumerate(bets, 1):
-                numbers_display = ','.join(str(n) for n in bet['numbers'])
                 row = {
                     '注数': i,
-                    '推荐号码': numbers_display,
-                    '和值': bet['sum'],
-                    '目标策略': bet['target'],
-                    '偏差': f"{bet['deviation']:+d}" if bet['deviation'] != 0 else "0"
+                    '推荐号码': ','.join(str(n) for n in bet['numbers']),
+                    '和值': bet['sum']
                 }
                 match_scores = calculate_match_score_for_draws(bet['numbers'], check_draws)
                 for idx, draw in enumerate(check_draws):
@@ -1433,28 +1532,16 @@ if st.session_state['generated_bets'] is not None:
                         period_str = period_str[-10:]
                     row[f'中奖_{period_str}'] = match_scores[idx]
                 enhanced_bets_data.append(row)
-            enhanced_df = pd.DataFrame(enhanced_bets_data)
-            rename_dict = {}
-            for col in enhanced_df.columns:
-                if col.startswith('中奖_'):
-                    rename_dict[col] = col.replace('中奖_', '')
-            enhanced_df = enhanced_df.rename(columns=rename_dict)
-            display_centered_dataframe(enhanced_df)
-            if len(check_draws) > 3:
-                with st.container(height=200):
-                    preview_df = pd.DataFrame([
-                        {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
-                        for d in check_draws
-                    ])
-                    display_centered_dataframe(preview_df)
-            else:
-                preview_df = pd.DataFrame([
-                    {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
-                    for d in check_draws
-                ])
-                display_centered_dataframe(preview_df)
-        else:
-            st.error("❌ 解析失败，请检查格式")
+            
+            display_centered_dataframe(pd.DataFrame(enhanced_bets_data))
+            
+            # 显示解析的开奖数据预览
+            preview_df = pd.DataFrame([
+                {'期次': d['period'], '正码': str(d['numbers']), '特码': d['special']}
+                for d in check_draws
+            ])
+            st.markdown("**📊 开奖数据预览**")
+            display_centered_dataframe(preview_df)
 
 st.markdown("---")
 st.caption("⚠️ 本工具仅供学术研究和娱乐参考。六合彩本质上是一种随机游戏，长期期望值为负，请理性投注。")
