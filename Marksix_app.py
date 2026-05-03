@@ -395,20 +395,25 @@ def has_consecutive_or_jump(nums):
             return True
     return False
 
-def get_dynamic_sum_range(draws, num_count, window=5, sigma_factor=0.5):
+def get_dynamic_sum_range(draws, num_count, window=4, sigma_factor=0.5, threshold_factor=0.1):
     """
     动态计算和值目标和范围（基于均值回归和标准差）
     
     Args:
         draws: 历史数据
         num_count: 号码个数 (6或7)
-        window: 近期趋势窗口
-        sigma_factor: 标准差系数 (推荐0.5)
+        window: 近期趋势窗口（默认4期，回测最优）
+        sigma_factor: 标准差系数 (目标偏移量，推荐0.5)
+        threshold_factor: 阈值系数 (判断是否需要回归，推荐0.1)
     
     Returns:
         target_sum: 目标和值
         tolerance: 容差范围
         direction: 趋势方向描述
+        direction_desc: 详细趋势描述
+        long_term_mean: 长期均值
+        long_term_std: 长期标准差
+        short_mean: 短期均值
     """
     # 计算长期统计（最近100期）
     recent_draws = draws[-100:] if len(draws) >= 100 else draws
@@ -416,31 +421,34 @@ def get_dynamic_sum_range(draws, num_count, window=5, sigma_factor=0.5):
     long_term_mean = np.mean(all_sum_7)
     long_term_std = np.std(all_sum_7)
     
-    # 计算短期趋势
+    # 计算短期趋势（最近window期）
     short_draws = draws[-window:] if len(draws) >= window else draws
     short_sum_7 = [convert_6sum_to_7sum(d['sum']) for d in short_draws]
     short_mean = np.mean(short_sum_7)
     
-    # 判断是否需要回归
-    threshold = long_term_std * 0.3
+    # 动态阈值
+    threshold = long_term_std * threshold_factor
     
+    # 判断趋势方向
     if short_mean > long_term_mean + threshold:
         # 偏大，向均值下方回归
         target = long_term_mean - long_term_std * sigma_factor
         direction = "偏大回归"
+        direction_desc = f"📈 偏大 (最近{window}期均值={short_mean:.1f} > 长期均值+{threshold:.1f})"
     elif short_mean < long_term_mean - threshold:
         # 偏小，向均值上方回归
         target = long_term_mean + long_term_std * sigma_factor
         direction = "偏小回归"
+        direction_desc = f"📉 偏小 (最近{window}期均值={short_mean:.1f} < 长期均值-{threshold:.1f})"
     else:
-        # 正常，使用均值
+        # 正常
         target = long_term_mean
         direction = "正常"
+        direction_desc = f"⚖️ 正常 (最近{window}期均值={short_mean:.1f} 在 ±{threshold:.1f} 范围内)"
     
-    # 动态容差
     tolerance = int(long_term_std * sigma_factor)
     
-    return int(target), tolerance, direction, long_term_mean, long_term_std
+    return int(target), tolerance, direction, direction_desc, long_term_mean, long_term_std, short_mean
 
 def get_sampling_weights(scores, temperature=1.5):
     """指数映射权重函数"""
@@ -496,13 +504,14 @@ def generate_one_combination(weights, num_count, target_sum, tolerance, require_
         if is_valid_combination(selected, target_sum, tolerance, require_pattern, require_prev_repeat, last_draw_all):
             return selected, sum(selected)
     
-    # 降级
+    # 降级：放松和值约束
     for _ in range(5000):
         selected = weighted_random_sample(weights, k=num_count)
         total = sum(selected)
         if abs(total - target_sum) <= tolerance + 5:
             return selected, total
     
+    # 最后降级
     return sorted(random.sample(range(1, 50), num_count)), sum(sorted(random.sample(range(1, 50), num_count)))
 
 def set_random_seed(seed_value):
@@ -535,24 +544,25 @@ def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_patt
     weights = get_sampling_weights(enhanced_scores, temperature=1.5)
     
     # 4. 动态和值范围
-    target_sum, tolerance, direction, long_term_mean, long_term_std = get_dynamic_sum_range(draws, num_count, window=trend_window, sigma_factor=0.5)
+    target_sum, tolerance, direction, _, _, _, _ = get_dynamic_sum_range(draws, num_count, window=trend_window, sigma_factor=0.5, threshold_factor=0.1)
     
-    # 修正目标值（根据注数动态调整）
+    # 修正目标值范围
     base_target = get_target_sum_by_numbers_count(num_count)
+    target_sum = max(base_target - 2 * tolerance, min(base_target + 2 * tolerance, target_sum))
     
-    # 注数分配
+    # 注数分配：1/3大中小 + 2/3趋势
     num_trend = int(num_bets * 2 / 3)
-    num_small_medium_large = num_bets - num_trend
+    num_sml = num_bets - num_trend
     
     # 大中小目标值
     sml_targets = []
-    if num_small_medium_large >= 1:
+    if num_sml >= 1:
         sml_targets.append(base_target - 15)
-    if num_small_medium_large >= 2:
+    if num_sml >= 2:
         sml_targets.append(base_target)
-    if num_small_medium_large >= 3:
+    if num_sml >= 3:
         sml_targets.append(base_target + 15)
-    while len(sml_targets) < num_small_medium_large:
+    while len(sml_targets) < num_sml:
         sml_targets.append(random.choice([base_target - 15, base_target, base_target + 15]))
     
     bets = []
@@ -565,16 +575,16 @@ def generate_bets_by_strategy(draws, num_bets, strategy, num_count, require_patt
         )
         bets.append({'numbers': nums, 'sum': total, 'target': f'和值目标{t}', 'deviation': total - base_target})
     
-    # 生成趋势部分（使用动态预测）
+    # 生成趋势部分
     for i in range(num_trend):
         offset = random.randint(-tolerance, tolerance)
-        t = target_sum + offset
+        t = int(target_sum + offset)
         t = max(base_target - 2 * tolerance, min(base_target + 2 * tolerance, t))
         nums, total = generate_one_combination(
-            weights, num_count, int(t), tolerance,
+            weights, num_count, t, tolerance,
             require_pattern, require_prev_repeat, last_draw_all
         )
-        bets.append({'numbers': nums, 'sum': total, 'target': f'{direction}(目标{int(t)})', 'deviation': total - base_target})
+        bets.append({'numbers': nums, 'sum': total, 'target': f'{direction}(目标{t})', 'deviation': total - base_target})
     
     return bets
 
@@ -807,7 +817,7 @@ def show_admin_page():
             
             col6, col7, col8 = st.columns(3)
             with col6:
-                backtest_trend_window = st.number_input("趋势窗口", min_value=3, max_value=20, value=5, step=1, key="backtest_trend_window")
+                backtest_trend_window = st.number_input("趋势窗口", min_value=2, max_value=20, value=4, step=1, key="backtest_trend_window", help="推荐4期（回测最优）")
             with col7:
                 backtest_periods = st.number_input("测试期数", min_value=5, max_value=min(100, len(draws)-50), value=min(20, len(draws)-50), step=5, key="backtest_periods")
             with col8:
@@ -897,13 +907,16 @@ with st.sidebar:
         st.markdown("""
         **基于均值回归和标准差的动态预测**
         
-        | 趋势 | 预测规则 | 容差 |
-        |------|----------|------|
-        | 偏大(>均值+0.3σ) | 均值 - 0.5σ | ±0.5σ |
-        | 偏小(<均值-0.3σ) | 均值 + 0.5σ | ±0.5σ |
-        | 正常 | 均值 | ±0.5σ |
+        | 参数 | 值 | 说明 |
+        |------|-----|------|
+        | 趋势窗口 | **4期** | 回测最优 |
+        | 阈值因子 | 0.1σ | 判断灵敏度 |
+        | 目标偏移 | 0.5σ | 回归强度 |
         
-        σ = 最近100期标准差
+        **判断规则**:
+        - 短期均值 > 长期均值 + 0.1σ → 偏大回归
+        - 短期均值 < 长期均值 - 0.1σ → 偏小回归
+        - 否则 → 正常
         """)
     with st.expander("💰 奖金结构", expanded=False):
         st.markdown("""
@@ -1021,9 +1034,9 @@ with col3:
 with col4:
     st.metric("最小和值", f"{min(all_sum_7)}")
 
-# 动态预测显示
-target_sum, tolerance, direction, _, _ = get_dynamic_sum_range(draws, 7, window=5, sigma_factor=0.5)
-st.info(f"**📊 动态和值预测**: 基于最近100期统计 (均值={mean_sum:.1f}, σ={std_sum:.1f}) | 趋势方向: {direction} | 预测目标: {target_sum} | 容差: ±{tolerance}")
+# 动态预测显示（使用默认窗口4期）
+target_sum, tolerance, direction, direction_desc, _, _, short_mean = get_dynamic_sum_range(draws, 7, window=4, sigma_factor=0.5, threshold_factor=0.1)
+st.info(f"**📊 动态和值预测**: {direction_desc} | 预测目标: {target_sum} | 容差: ±{tolerance}")
 
 # ==================== 智能投注生成 ====================
 st.subheader("🎲 智能投注生成")
@@ -1064,11 +1077,11 @@ col1, col2, col3 = st.columns(3)
 with col1:
     trend_window = st.number_input(
         "趋势预测窗口",
-        min_value=3,
+        min_value=2,
         max_value=20,
-        value=5,
+        value=4,
         step=1,
-        help="和值趋势预测使用的最近期数"
+        help="推荐4期（回测最优）"
     )
 with col2:
     seed_input = st.text_input(
@@ -1088,9 +1101,11 @@ with col3:
         help="使用最近N期数据计算冷热码"
     )
 
-# 显示动态和值提示
-target_sum, tolerance, direction, mean_sum, std_sum = get_dynamic_sum_range(draws, num_count, window=trend_window, sigma_factor=0.5)
-st.caption(f"💡 **和值动态预测**: 均值={mean_sum:.1f}, σ={std_sum:.1f} | 趋势={direction} | 目标={target_sum} | 容差=±{tolerance}")
+# 显示动态和值提示（使用用户选择的窗口）
+target_sum, tolerance, direction, direction_desc, mean_sum, std_sum, short_mean = get_dynamic_sum_range(
+    draws, num_count, window=trend_window, sigma_factor=0.5, threshold_factor=0.1
+)
+st.caption(f"💡 **和值动态预测**: 长期均值={mean_sum:.1f}, σ={std_sum:.1f} | 短期均值={short_mean:.1f} | {direction_desc} | 目标={target_sum} | 容差=±{tolerance}")
 
 if st.button("🚀 生成智能投注", type="primary"):
     random_seed = None
