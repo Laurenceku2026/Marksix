@@ -729,6 +729,8 @@ def show_admin_page():
             st.markdown("""
             **💡 使用说明**
             - 双击单元格可直接编辑内容
+            - 点击列标题可排序（点击期次列可按期次排序）
+            - 使用下方下拉菜单可选择默认排序
             - 点击行首的 `+` 可新增行
             - 选中行后按 `Delete` 可删除行
             - 编辑完成后点击 **💾 保存到Supabase** 按钮
@@ -745,16 +747,33 @@ def show_admin_page():
                     'sum': '和值'
                 })
                 df_current['正码(6个)'] = df_current['正码(6个)'].apply(lambda x: ','.join(map(str, x)) if isinstance(x, list) else str(x))
-                
-                # 转换日期列为字符串，避免DateColumn兼容性问题
                 df_current['開獎日期'] = df_current['開獎日期'].apply(lambda x: str(x) if pd.notna(x) else '')
                 
-                # 使用data_editor进行编辑（不使用column_config的DateColumn，改用TextColumn）
+                # 排序选项
+                col_sort1, col_sort2 = st.columns([1, 3])
+                with col_sort1:
+                    sort_order = st.selectbox(
+                        "默认排序",
+                        ["期次降序(最新在上)", "期次升序(最旧在上)", "原始顺序"],
+                        key="sort_order_select"
+                    )
+                
+                # 应用排序
+                if sort_order == "期次降序(最新在上)":
+                    df_current = df_current.sort_values(by='期次', ascending=False)
+                elif sort_order == "期次升序(最旧在上)":
+                    df_current = df_current.sort_values(by='期次', ascending=True)
+                
+                with col_sort2:
+                    st.caption(f"📊 共 {len(df_current)} 期数据 | 当前排序: {sort_order} | 💡 提示: 也可点击列标题自定义排序")
+                
+                # 使用data_editor进行编辑
                 edited_df = st.data_editor(
                     df_current,
                     use_container_width=True,
                     hide_index=True,
                     num_rows="dynamic",
+                    column_order=["期次", "開獎日期", "正码(6个)", "特码", "和值"],
                     column_config={
                         "期次": st.column_config.NumberColumn("期次", required=True, step=1),
                         "開獎日期": st.column_config.TextColumn("開獎日期", required=False, help="格式: YYYY-MM-DD"),
@@ -778,27 +797,20 @@ def show_admin_page():
                                         errors.append(f"第{idx+1}行: 期次不能为空")
                                         continue
                                     
-                                    # 处理日期
                                     date_val = row['開獎日期']
                                     date_str = None
                                     if pd.notna(date_val) and str(date_val).strip():
-                                        try:
-                                            # 尝试解析各种日期格式
-                                            date_str = str(date_val).strip()
-                                            # 如果是YYYY-MM-DD格式
-                                            if len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
-                                                pass  # 已经是正确格式
-                                            else:
-                                                # 尝试解析为datetime
-                                                for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
-                                                    try:
-                                                        dt = datetime.strptime(date_str, fmt)
-                                                        date_str = dt.strftime("%Y-%m-%d")
-                                                        break
-                                                    except:
-                                                        pass
-                                        except:
-                                            date_str = None
+                                        date_str = str(date_val).strip()
+                                        if len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
+                                            pass
+                                        else:
+                                            for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
+                                                try:
+                                                    dt = datetime.strptime(date_str, fmt)
+                                                    date_str = dt.strftime("%Y-%m-%d")
+                                                    break
+                                                except:
+                                                    pass
                                     
                                     numbers_str = str(row['正码(6个)']).strip()
                                     if not numbers_str:
@@ -862,6 +874,7 @@ def show_admin_page():
                     use_container_width=True,
                     hide_index=True,
                     num_rows="dynamic",
+                    column_order=["期次", "開獎日期", "正码(6个)", "特码", "和值"],
                     column_config={
                         "期次": st.column_config.NumberColumn("期次", required=True, step=1),
                         "開獎日期": st.column_config.TextColumn("開獎日期", required=False, help="格式: YYYY-MM-DD"),
